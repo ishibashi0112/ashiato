@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.ashiato/
+*.log
+.DS_Store
