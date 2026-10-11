@@ -85,6 +85,29 @@ Select a step in the timeline and the **Screen** panel shows what the screen loo
 - **Video (any app):** press **● Record screen** in the timeline and pick a window or the whole screen. This works for anything on your desktop, such as a WinForms / WPF app with WebView2, not only the browser. The video is uploaded to the recorder every second, and each step jumps to its moment in the video.
 - Both stay on your machine, next to the session file: `<session>.replay.ndjson` (up to 1 GB) and `<session>.video-<n>.webm`. `ashiato show` replays them too.
 
+## Evidence export (Excel / PDF)
+
+Turn a session into test evidence: click **⤓ Excel** or **⤓ PDF** in the timeline, or export a saved session from the terminal.
+
+```sh
+npx ashiato export .ashiato/sessions/2026-10-11T04-00-00-000Z.json --format xlsx,pdf
+```
+
+- **Excel:** a summary sheet (one row per step, linked to the step's sheet), an **All changes** sheet listing every changed row and column (with filters), and one sheet per step: what was clicked, its requests, screenshots, and the changed rows of each table. An update shows the row before and after, with the changed cells highlighted. Values keep their types; numbers longer than 15 digits (IDs) stay text so Excel doesn't round them.
+- **PDF:** the same evidence on A4 landscape with page numbers: a summary page, then a page per step. Tables show up to 200 rows per kind; the Excel file has them all.
+- **Screenshots:** each step gets the screen just before its action and the screen at its checkpoint, from the screen replay, or from the screen recording when there is no replay. Steps without a recorded screen get none.
+- **Local only:** the PDF and the screenshots are made by the Chrome or Edge already on your machine (every Windows has Edge), started headless with a throwaway profile and no network access except localhost. The Excel file needs no browser. If a policy turns off the browser's remote debugging, the PDF is printed without page numbers and screenshots.
+- The language follows your machine (Japanese or English). In the timeline, **Hide steps without changes** also leaves those steps out of the export.
+
+| Option | |
+| --- | --- |
+| `--format xlsx,pdf,html` | Formats to write (default `xlsx`). `html` is the printable page the PDF is made from |
+| `--out <path>` | Output file, or folder (default: next to the session file, same name) |
+| `--lang ja\|en` | Language of the document (default: the machine's) |
+| `--changed-only` | Leave out steps that changed no rows |
+| `--no-screens` | No screenshots |
+| `--browser <path>` | Chrome / Edge to use (or set `ASHIATO_BROWSER`) |
+
 ## Large tables
 
 Only the first snapshot reads every row. After that, the database splits each table into buckets of about 256 rows and returns a row count and a checksum per bucket. Only buckets whose checksum changed are read again, so a checkpoint where nothing changed transfers almost nothing. It is all plain `SELECT`s: no setting changes, no extra permissions.
@@ -151,6 +174,7 @@ The recorder listens on `127.0.0.1` only.
 | `GET /api/replay` | All replay events, one `{ tab, events }` batch per line (supports `Range`) |
 | `POST /api/video`, `/api/video/:id/chunk`, `/api/video/:id/stop` | Screen recording upload (from the timeline UI only) |
 | `GET /api/video/:id` | A screen recording (supports `Range`) |
+| `GET /api/export?format=xlsx\|pdf\|html&lang=ja&changedOnly=1` | Evidence file (requests from the timeline page only) |
 
 Other web pages open in your browser can call `POST /api/checkpoint` and `POST /api/replay` (the app under test runs on another origin), but they can't read recorded rows, replays or videos back.
 
@@ -168,7 +192,7 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 2. ✅ Vite plugin: checkpoint automatically around each user action (fetch / XHR / WebView2 `postMessage`)
 3. ✅ Screen replay (rrweb) and screen recording synced with the timeline
 4. ✅ Faster checkpoints for large tables: re-read only the buckets whose checksum changed (`xmin`, `rowversion`, `ORA_ROWSCN`, row hashes)
-5. Evidence export (Excel / PDF)
+5. ✅ Evidence export (Excel / PDF) with screenshots of each step
 6. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
 
 ## Development
@@ -245,6 +269,29 @@ export default defineConfig({
 - **録画(どのアプリでも)**:タイムラインの **● Record screen** を押し、ウィンドウか画面全体を選びます。ブラウザに限らず、WebView2 を使った WinForms / WPF アプリなどデスクトップ上の何でも録画できます。動画は1秒ごとにレコーダーへ送られ、各ステップは動画内のその時刻に移動します
 - どちらもセッションファイルの隣(`<session>.replay.ndjson`(最大1GB)、`<session>.video-<n>.webm`)に保存され、外部には送られません。`ashiato show` でも再生できます
 
+### 証跡の出力(Excel / PDF)
+
+セッションをテストの証跡として出力します。タイムライン画面の **⤓ Excel** / **⤓ PDF** ボタンを押すか、保存済みのセッションをターミナルから出力します。
+
+```sh
+npx ashiato export .ashiato/sessions/2026-10-11T04-00-00-000Z.json --format xlsx,pdf
+```
+
+- **Excel**:概要シート(1ステップ1行。各ステップのシートへのリンク付き)、変わった行と列をすべて並べた **変更一覧** シート(フィルター付き)、ステップごとのシート(操作・通信・画面キャプチャ・テーブルごとの変更行)を出力します。更新は変更前と変更後の行を並べ、変わったセルを色付けします。値は型を保ったまま書き込み、15桁を超える数値(IDなど)はExcelで丸められないよう文字列にします
+- **PDF**:同じ内容をA4横・ページ番号付きで出力します。1ページ目が概要、以降は1ステップ1ページです。表は種類(追加・更新・削除)ごとに200行までで、全行はExcelにあります
+- **画面キャプチャ**:各ステップの「操作直前の画面」と「チェックポイント時点の画面」を、画面リプレイ(なければ画面録画)から切り出して載せます。画面を記録していないステップには付きません
+- **手元だけで完結**:PDFと画面キャプチャは、PCにインストール済みの Chrome / Edge(WindowsにはEdgeが必ずあります)を、使い捨てのプロファイル・localhost以外へのネットワークなしのヘッドレスで起動して作ります。Excelはブラウザなしで出力できます。ポリシーでブラウザのリモートデバッグが無効な場合は、ページ番号と画面キャプチャなしのPDFになります
+- 言語はPCの設定に合わせます(日本語/英語)。タイムライン画面で **Hide steps without changes** にチェックを入れると、変更のないステップは出力にも含めません
+
+| オプション | |
+| --- | --- |
+| `--format xlsx,pdf,html` | 出力形式(既定 `xlsx`)。`html` はPDFの元になる印刷用ページです |
+| `--out <パス>` | 出力ファイルまたはフォルダー(既定:セッションファイルの隣に同じ名前で) |
+| `--lang ja\|en` | 出力の言語(既定:PCの設定) |
+| `--changed-only` | 変更のないステップを含めない |
+| `--no-screens` | 画面キャプチャを付けない |
+| `--browser <パス>` | 使う Chrome / Edge(`ASHIATO_BROWSER` でも指定できます) |
+
 ### 大きなテーブル
 
 全件を読むのは最初のスナップショットだけです。以降は、DB側で各テーブルを約256行ずつのバケットに分け、バケットごとの行数とチェックサムを返します。チェックサムが変わったバケットだけを読み直すので、何も変わっていないチェックポイントではほとんど通信しません。使うのは通常の `SELECT` だけで、設定変更も追加の権限も不要です。
@@ -288,7 +335,7 @@ export default defineConfig({
 2. ✅ Viteプラグイン:操作ごとに自動でチェックポイント(fetch / XHR / WebView2 `postMessage`)
 3. ✅ タイムラインと同期した画面リプレイ(rrweb)・画面録画
 4. ✅ 大きなテーブル向けの高速化:チェックサムが変わったバケットだけを読み直す(`xmin`・`rowversion`・`ORA_ROWSCN`・行ハッシュ)
-5. テスト証跡の出力(Excel / PDF)
+5. ✅ テスト証跡の出力(Excel / PDF)。各ステップの画面キャプチャ付き
 6. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー
 
 ## License

@@ -8,7 +8,7 @@ Records which rows an app inserts, updates and deletes, using read-only (SELECT-
 - Database drivers (mssql, oracledb, pg, mysql2) are optional peer dependencies loaded with `loadDriver()`.
 
 ## Layout
-- `packages/ashiato` — the npm package: `src/core` (snapshot, diff, recorder, media: replay/video files next to the session), `src/adapters` (one file per database), `src/server` (HTTP API + static UI), `src/cli`, `src/vite` (Vite plugin, export `ashiato/vite`), `src/client` (browser script the plugin inlines: action tracker + fetch / XHR / WebView2 postMessage hooks + rrweb screen replay recording; built as `dist/client.global.js`).
+- `packages/ashiato` — the npm package: `src/core` (snapshot, diff, recorder, media: replay/video files next to the session), `src/adapters` (one file per database), `src/server` (HTTP API + static UI), `src/cli`, `src/export` (evidence export: dependency-free .xlsx writer, HTML printed to PDF and screenshots taken by a local headless Chrome / Edge over the DevTools pipe; `capture.ts` is the screenshot page's script, built as `dist/capture.global.js`), `src/vite` (Vite plugin, export `ashiato/vite`), `src/client` (browser script the plugin inlines: action tracker + fetch / XHR / WebView2 postMessage hooks + rrweb screen replay recording; built as `dist/client.global.js`).
 - `packages/ui` — React timeline UI (step list, diffs, rrweb replay, screen recording via getDisplayMedia), built into `packages/ashiato/dist/ui`.
 
 ## Commands

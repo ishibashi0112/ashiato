@@ -45,7 +45,9 @@ header {
 h1 { font-size: 18px; margin: 0; letter-spacing: 0.02em; }
 .meta { color: var(--muted); font-size: 12px; }
 .live { color: var(--del); font-size: 12px; font-weight: 600; }
-.checkpoint { margin-left: auto; display: flex; gap: 6px; }
+.export { margin-left: auto; display: inline-flex; gap: 6px; }
+.export button { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+.checkpoint { display: flex; gap: 6px; }
 .checkpoint input {
   width: 240px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--text);

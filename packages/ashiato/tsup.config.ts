@@ -17,7 +17,7 @@ export default defineConfig([
     shims: true,
     dts: { entry: { index: "src/index.ts", vite: "src/vite/index.ts" } },
     // dist/ui is built separately by @ashiato/ui
-    clean: ["**/*", "!ui/**", "!client.global.js"],
+    clean: ["**/*", "!ui/**", "!client.global.js", "!capture.global.js"],
   },
   {
     // injected into the page by the Vite plugin
@@ -26,5 +26,14 @@ export default defineConfig([
     platform: "browser",
     target: "es2020",
     minify: true,
+  },
+  {
+    // runs in the headless browser that takes the evidence export's screenshots
+    entry: { capture: "src/export/capture.ts" },
+    format: ["iife"],
+    platform: "browser",
+    target: "es2020",
+    minify: true,
+    loader: { ".css": "text" },
   },
 ]);
