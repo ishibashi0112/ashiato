@@ -3,7 +3,13 @@ import { EventEmitter } from "node:events";
 import type { DbAdapter } from "../adapters/types.js";
 import { diffSnapshots, tableId } from "./diff.js";
 import { takeSnapshot } from "./snapshot.js";
-import type { Session, Snapshot, Step, TableRef } from "./types.js";
+import type { ActionInfo, Session, Snapshot, Step, TableRef } from "./types.js";
+
+export interface CheckpointOptions {
+  action?: ActionInfo;
+  /** Don't record the step when nothing changed. */
+  dropIfEmpty?: boolean;
+}
 
 export interface RecorderOptions {
   /** Tables to watch. Matched case-insensitively against `name` or `schema.name`. Default: all tables. */
@@ -48,24 +54,32 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
     return this.session;
   }
 
-  /** Takes a new snapshot and records the changes since the previous one. Calls are serialized. */
-  checkpoint(label: string, source = "manual"): Promise<Step> {
-    const run = this.queue.then(() => this.doCheckpoint(label, source));
+  /**
+   * Takes a new snapshot and records the changes since the previous one. Calls are serialized.
+   * With `dropIfEmpty`, a checkpoint that found no changes is not added to the session and resolves to null.
+   */
+  checkpoint(label: string, source?: string): Promise<Step>;
+  checkpoint(label: string, source: string | undefined, options: CheckpointOptions & { dropIfEmpty: true }): Promise<Step | null>;
+  checkpoint(label: string, source?: string, options?: CheckpointOptions): Promise<Step | null>;
+  checkpoint(label: string, source = "manual", options: CheckpointOptions = {}): Promise<Step | null> {
+    const run = this.queue.then(() => this.doCheckpoint(label, source, options));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async doCheckpoint(label: string, source: string): Promise<Step> {
+  private async doCheckpoint(label: string, source: string, options: CheckpointOptions): Promise<Step | null> {
     if (!this.last) throw new Error("Recorder.start() must be called first");
     const started = performance.now();
     const next = await this.snapshot();
     const diff = diffSnapshots(this.last, next, { ignoreColumns: this.options.ignoreColumns });
     this.last = next;
+    if (options.dropIfEmpty && diff.tables.length === 0) return null;
     const step: Step = {
       id: this.session.steps.length + 1,
       label,
       at: next.takenAt,
       source,
+      ...(options.action ? { action: options.action } : {}),
       diff,
       durationMs: Math.round(performance.now() - started),
     };

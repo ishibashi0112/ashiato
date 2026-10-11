@@ -39,6 +39,35 @@ Then use your app. After each action, press **Enter** in the terminal (type a la
 
 Press **Ctrl+C** to stop. The session is saved in `.ashiato/sessions/`; open it again with `ashiato show <file>`.
 
+## Automatic checkpoints from your Vite app
+
+Add the plugin and every click, submit or Enter that sends requests becomes one checkpoint, labelled with what you clicked and the requests it made.
+
+```ts
+// vite.config.ts
+import ashiato from "ashiato/vite";
+
+export default defineConfig({
+  plugins: [react(), ashiato()], // dev server only; never included in builds
+});
+```
+
+![Vite timeline](docs/vite-timeline.png)
+
+- **What is tracked:** `fetch`, `XMLHttpRequest` (axios), and WebView2 `window.chrome.webview.postMessage` with JSON-RPC style `{ id, method }` → `{ id, result | error }` replies (webview2-bridge works as is). A WinForms / WPF host that loads the Vite dev server URL gets the same tracking.
+- **One checkpoint per action:** requests that start within 1s of a click, and requests chained after them, belong to that click. The checkpoint is taken 150ms after the last one finishes.
+- **Outside changes are kept apart:** right before an action's first request is sent, ashiato takes a quick checkpoint. Anything another user or a batch job changed shows up as an `outside actions` step instead of being blamed on your click. (The request waits for that read; turn it off with `syncBefore: false`.)
+- Requests with no click (page load, polling) are recorded only when they changed something. Clicks that send nothing are not recorded.
+
+| Option | Default | |
+| --- | --- | --- |
+| `recorder` | `http://127.0.0.1:4100` | URL of `ashiato record` (or `ASHIATO_RECORDER_URL`) |
+| `settleMs` | `150` | Quiet time after the last request before the checkpoint |
+| `oneWayMs` | `500` | Wait after a `postMessage` that gets no reply |
+| `syncBefore` | `true` | Checkpoint before each action so outside changes stay separate |
+| `ignore` | `[]` | URL substrings never tracked |
+| `enabled` | `true` | Also `ASHIATO=0` |
+
 ## Connection URLs
 
 | Database | URL | Driver |
@@ -84,10 +113,11 @@ This is what the upcoming browser integration (Vite plugin, WebView2 `postMessag
 ## Roadmap
 
 1. ✅ Read-only snapshot diff, all major databases, CLI, timeline UI
-2. Vite plugin: record user actions (rrweb) and API / WebView2 `postMessage` calls, checkpoint automatically around each one
-3. Faster diffs for large tables (range hashing, `rowversion` / `ORA_ROWSCN`)
-4. Screen video synced with the timeline, evidence export (Excel / PDF)
-5. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
+2. ✅ Vite plugin: checkpoint automatically around each user action (fetch / XHR / WebView2 `postMessage`)
+3. Screen replay (rrweb) and video synced with the timeline
+4. Faster diffs for large tables (range hashing, `rowversion` / `ORA_ROWSCN`)
+5. Evidence export (Excel / PDF)
+6. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
 
 ## Development
 
@@ -119,6 +149,24 @@ npx ashiato record --db "mssql://user:pass@localhost:1433/devdb?encrypt=false" -
 
 アプリを操作し、操作ごとにターミナルで **Enter** を押します(先にラベルを入力しても構いません)。タイムライン画面 <http://127.0.0.1:4100> の **Checkpoint** ボタンでも記録できます。**Ctrl+C** で終了すると、セッションが `.ashiato/sessions/` に保存されます。あとから `ashiato show <ファイル>` で見返せます。
 
+### Viteアプリから自動でチェックポイント
+
+```ts
+// vite.config.ts
+import ashiato from "ashiato/vite";
+
+export default defineConfig({
+  plugins: [react(), ashiato()], // dev サーバーのときだけ動き、本番ビルドには入りません
+});
+```
+
+通信を伴うクリック・送信・Enter が、それぞれ1つのチェックポイントになります。ラベルには、押したボタンと送った通信が入ります。
+
+- **追跡するもの**:`fetch`、`XMLHttpRequest`(axios)、WebView2 の `window.chrome.webview.postMessage`(JSON-RPC 形式 `{ id, method }` → `{ id, result | error }`。webview2-bridge はそのまま使えます)
+- **操作ごとに1つ**:クリックから1秒以内に始まった通信と、それに続く通信をそのクリックにまとめ、最後の通信が終わってから150ms後に記録します
+- **操作外の変更は分ける**:操作の最初の通信を送る直前に一度記録します。他の人やバッチによる変更は「outside actions」として別に表示し、あなたの操作のせいにはしません
+- クリックを伴わない通信(画面表示時、ポーリング)は、変更があったときだけ記録します。通信のないクリックは記録しません
+
 ### 参照専用スナップショットの制限
 
 - チェックポイント間の比較なので、その間に同じ行が2回変わった場合は最終結果だけが見えます
@@ -129,10 +177,11 @@ npx ashiato record --db "mssql://user:pass@localhost:1433/devdb?encrypt=false" -
 ### ロードマップ
 
 1. ✅ 参照専用スナップショット差分・主要DB対応・CLI・タイムライン画面
-2. Viteプラグイン:画面操作(rrweb)とAPI / WebView2 `postMessage` を記録し、操作ごとに自動でチェックポイントを打つ
-3. 大きなテーブル向けの高速化(範囲ハッシュ比較、`rowversion` / `ORA_ROWSCN`)
-4. タイムラインと同期した画面録画、テスト証跡の出力(Excel / PDF)
-5. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー
+2. ✅ Viteプラグイン:操作ごとに自動でチェックポイント(fetch / XHR / WebView2 `postMessage`)
+3. タイムラインと同期した画面リプレイ(rrweb)・画面録画
+4. 大きなテーブル向けの高速化(範囲ハッシュ比較、`rowversion` / `ORA_ROWSCN`)
+5. テスト証跡の出力(Excel / PDF)
+6. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー
 
 ## License
 

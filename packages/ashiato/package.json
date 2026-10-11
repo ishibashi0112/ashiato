@@ -17,7 +17,9 @@
     "oracle",
     "postgres",
     "mysql",
-    "sqlite"
+    "sqlite",
+    "vite-plugin",
+    "webview2"
   ],
   "engines": {
     "node": ">=22.5"
@@ -29,6 +31,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
     }
   },
   "files": [
@@ -43,7 +49,8 @@
     "mssql": ">=11",
     "mysql2": ">=3",
     "oracledb": ">=6",
-    "pg": ">=8"
+    "pg": ">=8",
+    "vite": ">=5"
   },
   "peerDependenciesMeta": {
     "mssql": {
@@ -57,6 +64,9 @@
     },
     "pg": {
       "optional": true
+    },
+    "vite": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -64,12 +74,15 @@
     "@types/node": "^22.20.5",
     "@types/oracledb": "^7.0.3",
     "@types/pg": "^8.23.1",
+    "happy-dom": "^20.14.6",
     "mssql": "^12.7.4",
     "mysql2": "^3.24.5",
     "oracledb": "^26.0.0",
     "pg": "^8.23.1",
+    "playwright-core": "1.56.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
+    "vite": "^7.3.7",
     "vitest": "^5.0.3"
   }
 }

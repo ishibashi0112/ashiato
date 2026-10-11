@@ -47,12 +47,36 @@ export interface Diff {
   tables: TableDiff[];
 }
 
+export interface RequestInfo {
+  kind: "http" | "rpc" | "message";
+  /** HTTP method, or the RPC method name. */
+  method: string;
+  /** URL for HTTP requests. */
+  url?: string;
+  status?: number;
+  error?: string;
+  durationMs?: number;
+}
+
+/** What the user did in the browser that led to a checkpoint (sent by the Vite plugin). */
+export interface ActionInfo {
+  /** "click" | "submit" | "change" | "enter" | "request" (a request with no user action, e.g. on page load) */
+  type: string;
+  /** Human-readable target, e.g. `button "Save"`. */
+  target?: string;
+  /** Page path when the action happened. */
+  page?: string;
+  startedAt: string;
+  requests: RequestInfo[];
+}
+
 export interface Step {
   id: number;
   label: string;
   at: string;
   /** Free-form origin of the checkpoint, e.g. "manual", "http", or an RPC method name. */
   source?: string;
+  action?: ActionInfo;
   diff: Diff;
   durationMs: number;
 }

@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize } from "node:path";
-import type { Session, Step } from "../core/types.js";
+import type { CheckpointOptions } from "../core/recorder.js";
+import type { ActionInfo, Session, Step } from "../core/types.js";
 
 export interface ServerOptions {
   port: number;
@@ -10,7 +11,7 @@ export interface ServerOptions {
   uiDir?: string;
   getSession: () => Session;
   /** Omit for read-only viewing of a saved session. */
-  checkpoint?: (label: string, source: string) => Promise<Step>;
+  checkpoint?: (label: string, source: string, options: CheckpointOptions) => Promise<Step | null>;
   /** Subscribe to new steps; returns an unsubscribe function. */
   onStep?: (listener: (step: Step) => void) => () => void;
 }
@@ -50,9 +51,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
 
   if (url.pathname === "/api/checkpoint" && req.method === "POST") {
     if (!o.checkpoint) return sendJson(res, 405, { error: "This session is read-only" });
-    const body = (await readJson(req)) as { label?: string; source?: string };
-    const step = await o.checkpoint(body.label?.trim() || "checkpoint", body.source ?? "http");
-    return sendJson(res, 200, step);
+    const body = (await readJson(req)) as { label?: string; source?: string; action?: ActionInfo; dropIfEmpty?: boolean };
+    const step = await o.checkpoint(body.label?.trim() || "checkpoint", body.source ?? "http", {
+      action: body.action,
+      dropIfEmpty: body.dropIfEmpty === true,
+    });
+    return sendJson(res, 200, step ?? { dropped: true });
   }
 
   if (url.pathname === "/api/events" && req.method === "GET") {

@@ -20,7 +20,7 @@ describe("server", () => {
     const server = await startServer({
       port: 0,
       getSession: () => session,
-      checkpoint: (label, source) => recorder.checkpoint(label, source),
+      checkpoint: (label, source, options) => recorder.checkpoint(label, source, options),
       onStep: (l) => {
         recorder.on("step", l);
         return () => recorder.off("step", l);

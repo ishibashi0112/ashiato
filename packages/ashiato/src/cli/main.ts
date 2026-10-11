@@ -114,7 +114,7 @@ export async function main(argv: string[]): Promise<void> {
       port,
       uiDir: uiDir(),
       getSession: () => session,
-      checkpoint: (label, source) => recorder.checkpoint(label, source),
+      checkpoint: (label, source, options) => recorder.checkpoint(label, source, options),
       onStep: (listener) => {
         recorder.on("step", listener);
         return () => recorder.off("step", listener);
