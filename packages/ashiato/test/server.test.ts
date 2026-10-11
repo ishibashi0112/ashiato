@@ -1,5 +1,5 @@
-import { mkdtempSync } from "node:fs";
-import { request } from "node:http";
+import { mkdtempSync, readdirSync } from "node:fs";
+import { Agent, request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,12 +116,26 @@ describe("server", () => {
     // the app's page (another origin) sends replay events but can't read them back
     const batch = JSON.stringify({ tab: "t1", events: [{ type: 4, timestamp: 1 }] });
     const posted = await raw("/api/replay", app, "POST", batch);
-    expect(posted.status).toBe(204);
     expect(posted.headers["access-control-allow-origin"]).toBe("*");
+    // no full snapshot from this tab yet: the page is asked for one
+    expect([posted.status, JSON.parse(posted.body)]).toEqual([200, { snapshot: true }]);
     expect((await raw("/api/replay", app, "POST", "not json")).status).toBe(400);
+    expect((await raw("/api/replay", app, "POST", JSON.stringify({ tab: "t1", events: [{ type: 2 }] }))).status).toBe(400);
     const read = await raw("/api/replay", { origin: "http://evil.example" });
     expect(read.headers["access-control-allow-origin"]).toBeUndefined();
     expect(JSON.parse(read.body.trim())).toEqual(JSON.parse(batch));
+
+    // the timeline reads only what was added since its last read
+    const second = JSON.stringify({ tab: "t1", events: [{ type: 2, timestamp: 2 }] });
+    expect(JSON.parse((await raw("/api/replay", app, "POST", second)).body)).toEqual({ snapshot: false });
+    const size = Buffer.byteLength(batch) + 1;
+    const rest = await raw("/api/replay", { range: `bytes=${size}-` });
+    expect([rest.status, rest.body]).toEqual([206, `${second}\n`]);
+    const none = await raw("/api/replay", { range: `bytes=${size + rest.body.length}-` });
+    expect([none.status, none.headers["content-range"]]).toEqual([416, `bytes */${size + rest.body.length}`]);
+
+    // pages of other origins can post here, so bodies are kept small (video chunks are same-origin only)
+    expect((await raw("/api/checkpoint", app, "POST", "x".repeat(2 * 1024 * 1024))).status).toBe(413);
 
     // recordings: only the UI's own origin may write
     const startBody = JSON.stringify({ mimeType: "video/webm", startedAt: "2026-10-11T00:00:00.000Z" });
@@ -142,5 +156,67 @@ describe("server", () => {
     expect(await tail.text()).toBe("789");
     expect((await fetch(`${base}/api/video/1`, { headers: { range: "bytes=20-" } })).status).toBe(416);
     expect((await fetch(`${base}/api/video/9`)).status).toBe(404);
+  });
+
+  it("sends no more than the size it announced while the file grows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-srv-"));
+    const session: Session = { version: 1, id: "x", startedAt: "t", dialect: "sqlite", tables: [], steps: [] };
+    const media = new MediaStore(join(dir, "s.json"), session);
+    const video = media.startVideo("video/webm", "2026-10-11T00:00:00.000Z");
+    media.appendVideo(video.id, Buffer.alloc(8 * 1024 * 1024, 1));
+    const server = await startServer({ port: 0, getSession: () => session, media });
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const port = (server.address() as AddressInfo).port;
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    cleanups.push(async () => agent.destroy());
+    // the recording goes on while the whole file is downloaded
+    const length = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path: `/api/video/${video.id}`, agent }, (res) => {
+        let size = 0;
+        res.once("data", () => media.appendVideo(video.id, Buffer.alloc(1024 * 1024, 2)));
+        res.on("data", (c: Buffer) => (size += c.length));
+        res.on("end", () => resolve(size));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    expect(length).toBe(8 * 1024 * 1024);
+    // the next request on the same connection reads a clean response
+    const next = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path: "/api/session", agent }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode!));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    expect(next).toBe(200);
+  });
+
+  it.skipIf(process.platform !== "linux")("closes files when the browser stops reading them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-srv-"));
+    const session: Session = { version: 1, id: "x", startedAt: "t", dialect: "sqlite", tables: [], steps: [] };
+    const media = new MediaStore(join(dir, "s.json"), session);
+    const video = media.startVideo("video/webm", "2026-10-11T00:00:00.000Z");
+    media.appendVideo(video.id, Buffer.alloc(8 * 1024 * 1024));
+    const server = await startServer({ port: 0, getSession: () => session, media });
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const port = (server.address() as AddressInfo).port;
+    const openFiles = () => readdirSync("/proc/self/fd").length;
+    const before = openFiles();
+    // a <video> seeking: it drops each response after its first bytes
+    for (let i = 0; i < 20; i++) {
+      await new Promise<void>((resolve, reject) => {
+        const req = request({ host: "127.0.0.1", port, path: `/api/video/${video.id}`, headers: { range: "bytes=0-" } }, (res) =>
+          res.once("data", () => {
+            req.destroy();
+            resolve();
+          }),
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    }
+    await expect.poll(openFiles, { timeout: 5000 }).toBeLessThanOrEqual(before + 2);
   });
 });

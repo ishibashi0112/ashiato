@@ -54,8 +54,8 @@ export default defineConfig({
 
 ![Vite timeline](docs/vite-timeline.png)
 
-- **What is tracked:** `fetch`, `XMLHttpRequest` (axios), and WebView2 `window.chrome.webview.postMessage` with JSON-RPC style `{ id, method }` → `{ id, result | error }` replies (webview2-bridge works as is). A WinForms / WPF host that loads the Vite dev server URL gets the same tracking.
-- **One checkpoint per action:** requests that start within 1s of a click, and requests chained after them, belong to that click. The checkpoint is taken 150ms after the last one finishes.
+- **What is tracked:** `fetch`, `XMLHttpRequest` (axios), and WebView2 `window.chrome.webview.postMessage` with JSON-RPC style `{ id, method }` → `{ id, result | error }` replies (webview2-bridge works as is). A WinForms / WPF host that loads the Vite dev server URL gets the same tracking. Synchronous XHR (`open(method, url, false)`) and `chrome.webview.postMessageWithAdditionalObjects` are not tracked.
+- **One checkpoint per action:** requests that start within 1s of a click, and requests chained after them, belong to that click. The checkpoint is taken 150ms after the last one finishes. A poller that sends requests less than `settleMs` apart keeps an action open until `maxRequestMs`, so add fast-polling endpoints to `ignore`.
 - **Outside changes are kept apart:** right before an action's first request is sent, ashiato takes a quick checkpoint. Anything another user or a batch job changed shows up as an `outside actions` step instead of being blamed on your click. (The request waits for that read; turn it off with `syncBefore: false`.)
 - Requests with no click (page load, polling) are recorded only when they changed something. Clicks that send nothing are not recorded.
 
@@ -65,6 +65,10 @@ export default defineConfig({
 | `settleMs` | `150` | Quiet time after the last request before the checkpoint |
 | `oneWayMs` | `500` | Wait after a `postMessage` that gets no reply |
 | `syncBefore` | `true` | Checkpoint before each action so outside changes stay separate |
+| `syncTimeoutMs` | `5000` | Longest a request waits for that checkpoint |
+| `mergeMs` | `300` | Events this close together, before any request, count as one action (click + submit) |
+| `attachMs` | `1000` | A request belongs to the last click only if it starts within this time (or while the click's requests are running) |
+| `maxRequestMs` | `30000` | A request still open after this long is recorded as "no reply"; an action this old takes no new requests |
 | `ignore` | `[]` | URL substrings never tracked |
 | `replay` | `true` | Record the page for screen replay. `{ maskAllInputs: true }` hides every input value |
 | `enabled` | `true` | Also `ASHIATO=0` |
@@ -75,9 +79,9 @@ Select a step in the timeline and the **Screen** panel shows what the screen loo
 
 ![Screen replay](docs/replay.png)
 
-- **Replay (Vite plugin):** the page is recorded as DOM changes with [rrweb](https://github.com/rrweb-io/rrweb), not pixels, so it is light and sharp. Password fields are always masked. Each browser tab is kept apart.
+- **Replay (Vite plugin):** the page is recorded as DOM changes with [rrweb](https://github.com/rrweb-io/rrweb), not pixels, so it is light and sharp. Password fields are always masked. Each browser tab is kept apart (a popup gets its own; frames are part of their page). Pages already open when the recorder starts are replayed from a few seconds after it starts.
 - **Video (any app):** press **● Record screen** in the timeline and pick a window or the whole screen. This works for anything on your desktop, such as a WinForms / WPF app with WebView2, not only the browser. The video is uploaded to the recorder every second, and each step jumps to its moment in the video.
-- Both stay on your machine, next to the session file: `<session>.replay.ndjson` and `<session>.video-<n>.webm`. `ashiato show` replays them too.
+- Both stay on your machine, next to the session file: `<session>.replay.ndjson` (up to 1 GB) and `<session>.video-<n>.webm`. `ashiato show` replays them too.
 
 ## Large tables
 
@@ -128,8 +132,8 @@ The recorder listens on `127.0.0.1` only.
 | `POST /api/checkpoint` `{ "label": "click Save", "source": "orders.save" }` | Take a checkpoint, returns the step |
 | `GET /api/session` | The whole session |
 | `GET /api/events` | Server-sent events, one `step` event per checkpoint |
-| `POST /api/replay` `{ "tab": "a1b2", "events": [...] }` | Append rrweb events (sent by the Vite plugin) |
-| `GET /api/replay` | All replay events, one `{ tab, events }` batch per line |
+| `POST /api/replay` `{ "tab": "a1b2", "events": [...] }` | Append rrweb events (sent by the Vite plugin). Replies `{ "snapshot": true }` while the tab has sent no full snapshot |
+| `GET /api/replay` | All replay events, one `{ tab, events }` batch per line (supports `Range`) |
 | `POST /api/video`, `/api/video/:id/chunk`, `/api/video/:id/stop` | Screen recording upload (from the timeline UI only) |
 | `GET /api/video/:id` | A screen recording (supports `Range`) |
 
@@ -195,18 +199,32 @@ export default defineConfig({
 
 通信を伴うクリック・送信・Enter が、それぞれ1つのチェックポイントになります。ラベルには、押したボタンと送った通信が入ります。
 
-- **追跡するもの**:`fetch`、`XMLHttpRequest`(axios)、WebView2 の `window.chrome.webview.postMessage`(JSON-RPC 形式 `{ id, method }` → `{ id, result | error }`。webview2-bridge はそのまま使えます)
-- **操作ごとに1つ**:クリックから1秒以内に始まった通信と、それに続く通信をそのクリックにまとめ、最後の通信が終わってから150ms後に記録します
+- **追跡するもの**:`fetch`、`XMLHttpRequest`(axios)、WebView2 の `window.chrome.webview.postMessage`(JSON-RPC 形式 `{ id, method }` → `{ id, result | error }`。webview2-bridge はそのまま使えます)。同期 XHR(`open(method, url, false)`)と `chrome.webview.postMessageWithAdditionalObjects` は追跡しません
+- **操作ごとに1つ**:クリックから1秒以内に始まった通信と、それに続く通信をそのクリックにまとめ、最後の通信が終わってから150ms後に記録します。`settleMs` より短い間隔で通信するポーリングがあると、操作が `maxRequestMs` まで終わらないため、そのURLは `ignore` に指定してください
 - **操作外の変更は分ける**:操作の最初の通信を送る直前に一度記録します。他の人やバッチによる変更は「outside actions」として別に表示し、あなたの操作のせいにはしません
 - クリックを伴わない通信(画面表示時、ポーリング)は、変更があったときだけ記録します。通信のないクリックは記録しません
+
+| オプション | 既定値 | |
+| --- | --- | --- |
+| `recorder` | `http://127.0.0.1:4100` | `ashiato record` のURL(`ASHIATO_RECORDER_URL` でも指定できます) |
+| `settleMs` | `150` | 最後の通信が終わってからチェックポイントまでの待ち時間 |
+| `oneWayMs` | `500` | 返信のない `postMessage` のあとに待つ時間 |
+| `syncBefore` | `true` | 操作の前にも記録して、操作外の変更を分ける |
+| `syncTimeoutMs` | `5000` | 通信がその記録を待つ最大時間 |
+| `mergeMs` | `300` | 通信が始まる前にこの間隔で続いたイベントを1つの操作にまとめる(クリック+送信) |
+| `attachMs` | `1000` | この時間内に始まった通信(またはクリックの通信が続いている間に始まった通信)だけを直前のクリックにまとめる |
+| `maxRequestMs` | `30000` | この時間を過ぎても終わらない通信は「応答なし」として記録する。これより古い操作には新しい通信をまとめない |
+| `ignore` | `[]` | 追跡しないURL(部分一致) |
+| `replay` | `true` | 画面リプレイ用にページを記録する。`{ maskAllInputs: true }` ですべての入力値を隠す |
+| `enabled` | `true` | `ASHIATO=0` でも無効にできる |
 
 ### 画面リプレイと画面録画
 
 タイムラインでステップを選ぶと、**Screen** 欄にそのときの画面が表示されます。**▶ Play this action** で、クリックの直前からチェックポイントまでを再生します。
 
-- **リプレイ(Viteプラグイン)**:画面を動画ではなくDOMの変化として [rrweb](https://github.com/rrweb-io/rrweb) で記録するので、軽くて鮮明です。パスワード欄は常に伏せ字になり、すべての入力値を隠すなら `replay: { maskAllInputs: true }` を指定します。タブごとに分けて記録します
+- **リプレイ(Viteプラグイン)**:画面を動画ではなくDOMの変化として [rrweb](https://github.com/rrweb-io/rrweb) で記録するので、軽くて鮮明です。パスワード欄は常に伏せ字になり、すべての入力値を隠すなら `replay: { maskAllInputs: true }` を指定します。タブごとに分けて記録します(ポップアップは別のタブ、フレームはそのページの一部として扱います)。レコーダーより先に開いていたページは、レコーダー起動の数秒後から再生できます
 - **録画(どのアプリでも)**:タイムラインの **● Record screen** を押し、ウィンドウか画面全体を選びます。ブラウザに限らず、WebView2 を使った WinForms / WPF アプリなどデスクトップ上の何でも録画できます。動画は1秒ごとにレコーダーへ送られ、各ステップは動画内のその時刻に移動します
-- どちらもセッションファイルの隣(`<session>.replay.ndjson`、`<session>.video-<n>.webm`)に保存され、外部には送られません。`ashiato show` でも再生できます
+- どちらもセッションファイルの隣(`<session>.replay.ndjson`(最大1GB)、`<session>.video-<n>.webm`)に保存され、外部には送られません。`ashiato show` でも再生できます
 
 ### 大きなテーブル
 

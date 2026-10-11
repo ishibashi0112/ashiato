@@ -275,4 +275,90 @@ describe("Tracker", () => {
     await flush(200);
     expect(sent.map((p) => p.label)).toEqual(["outside actions"]); // not sent twice
   });
+
+  it("lets an action settle although a fast poller keeps sending requests", async () => {
+    const t = make();
+    // a progress poll every 100ms, answered in 20ms: never quiet for settleMs
+    const poll = setInterval(() => {
+      const h = t.beginRequest({ kind: "http", method: "GET", url: "/api/progress" });
+      setTimeout(() => h.end({ status: 200 }), 20);
+    }, 100);
+    try {
+      await flush(1000);
+      t.userAction("click", 'button "Save"');
+      const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+      await save.ready;
+      save.end({ status: 200 });
+      // the action takes no requests once it is maxRequestMs old, so it can settle then
+      await flush(30_000 + 300);
+      const cp = sent.find((p) => p.label === 'click button "Save"');
+      expect(cp?.action?.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+      // the poller carries on in actions of its own, dropped when nothing changed
+      const count = sent.length;
+      await flush(30_000 + 300);
+      expect(sent.slice(count)).toMatchObject([{ action: { type: "request" }, dropIfEmpty: true }]);
+    } finally {
+      clearInterval(poll);
+    }
+  });
+
+  it("keeps a request with its click even when a confirm() was open longer than maxRequestMs", async () => {
+    let clock = 0;
+    const t = make({ now: () => clock, maxRequestMs: 2000 });
+    t.userAction("click", 'button "Delete"');
+    clock += 5000;
+    const a = t.beginRequest({ kind: "http", method: "DELETE", url: "/orders/1" });
+    a.end();
+    await flush(200);
+    expect(sent.at(-1)?.label).toBe('click button "Delete"');
+  });
+
+  it("stops waiting for sync checkpoints while the recorder doesn't answer one", async () => {
+    sent = [];
+    let answer!: () => void;
+    const t = new Tracker({
+      page: () => "/",
+      syncTimeoutMs: 1000,
+      send: (p) => {
+        sent.push(p);
+        // the recorder accepts the first request but doesn't answer it until answer()
+        return sent.length === 1 ? new Promise<void>((r) => (answer = r)) : Promise.resolve();
+      },
+    });
+    t.userAction("click", 'button "A"');
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/a" });
+    expect(a.waiting).toBe(true);
+    await flush(1000); // waited out syncTimeoutMs
+    a.end();
+    await flush(150);
+
+    t.userAction("click", 'button "B"');
+    const b = t.beginRequest({ kind: "http", method: "POST", url: "/b" });
+    expect(b.waiting).toBe(false); // no new sync to wait for
+    b.end();
+    await flush(150);
+    expect(sent.map((p) => p.label)).toEqual(["outside actions"]); // the rest is queued behind it
+
+    answer();
+    await flush(0);
+    expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "A"', 'click button "B"']);
+    // the recorder answers again: actions get their sync again
+    t.userAction("click", 'button "C"');
+    const c = t.beginRequest({ kind: "http", method: "POST", url: "/c" });
+    expect(c.waiting).toBe(true);
+    await c.ready;
+    expect(sent.map((p) => p.label).at(-1)).toBe("outside actions");
+  });
+
+  it("tells the caller once a request has ended, also when the time cap ends it", async () => {
+    const t = make({ maxRequestMs: 1000 });
+    const ended: string[] = [];
+    const a = t.beginRequest({ kind: "rpc", method: "a" }, () => ended.push("a"));
+    t.beginRequest({ kind: "rpc", method: "b" }, () => ended.push("b"));
+    a.end();
+    a.end();
+    expect(ended).toEqual(["a"]);
+    await flush(1000);
+    expect(ended).toEqual(["a", "b"]);
+  });
 });
