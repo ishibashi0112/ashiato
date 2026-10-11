@@ -15,11 +15,12 @@ function keyText(key: string[], row: Row): string {
 }
 
 /** Human-readable summary of one step for the terminal. */
-export function formatStep(step: Step, maxRowsPerKind = 5): string {
+export function formatStep(step: Step, maxRowsPerKind = 5, showSkipped = true): string {
   const c = countChanges(step.diff);
   const via = step.source && !["manual", "http", "ui"].includes(step.source) && step.source !== step.label ? `  ${dim(step.source)}` : "";
   const lines = [`#${step.id} ${step.label}${via}  ${dim(`(+${c.inserted} ~${c.updated} -${c.deleted}, ${step.durationMs}ms)`)}`];
   if (step.diff.tables.length === 0) lines.push(dim("  no changes"));
+  if (showSkipped) for (const s of step.skipped ?? []) lines.push(yellow(`  ! ${tableId(s.table)} not compared: ${s.reason}`));
   for (const t of step.diff.tables) {
     lines.push(`  ${tableId(t.table)}`);
     for (const r of t.inserted.slice(0, maxRowsPerKind)) lines.push(green(`    + ${keyText(t.key, r)}`));

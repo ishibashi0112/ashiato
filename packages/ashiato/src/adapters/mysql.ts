@@ -9,8 +9,24 @@ const name = (t: TableRef) => (t.schema ? `${q(t.schema)}.${q(t.name)}` : q(t.na
 /** mysql://user:password@host:3306/database — also works for MariaDB. */
 export async function connectMysql(url: URL): Promise<DbAdapter> {
   const mysql = await loadDriver<typeof import("mysql2/promise")>("mysql2/promise", "MySQL");
-  const conn = await mysql.createConnection({ uri: url.toString(), dateStrings: true, supportBigNumbers: true, bigNumberStrings: true });
-  const query = async (sql: string, params: unknown[] = []) => (await conn.query(sql, params))[0] as Record<string, unknown>[];
+  const pool = mysql.createPool({
+    uri: url.toString(),
+    connectionLimit: 1,
+    enableKeepAlive: true,
+    dateStrings: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const query = async (sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> => {
+    try {
+      return (await pool.query(sql, params))[0] as Record<string, unknown>[];
+    } catch (e) {
+      // the server closed the connection (wait_timeout, restart): the pool opens a new one
+      if (!(e as { fatal?: boolean }).fatal) throw e;
+      return (await pool.query(sql, params))[0] as Record<string, unknown>[];
+    }
+  };
+  await query("SELECT 1");
 
   return {
     dialect: "mysql",
@@ -37,7 +53,7 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
       return (await query(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
     },
     async close() {
-      await conn.end();
+      await pool.end();
     },
   };
 }

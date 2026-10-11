@@ -18,11 +18,25 @@ export function diffSnapshots(before: Snapshot, after: Snapshot, options: DiffOp
   for (const a of after.tables) {
     const b = beforeById.get(tableId(a.table));
     if (!b || a.skipped || b.skipped) continue;
-    const d = a.key.length > 0 ? diffByKey(b, a, ignore) : diffAsMultiset(b, a, ignore);
+    const d = a.key.length > 0 && uniqueKeys(b) && uniqueKeys(a) ? diffByKey(b, a, ignore) : diffAsMultiset(b, a, ignore);
     if (d.inserted.length || d.deleted.length || d.updated.length) tables.push(d);
   }
 
   return { from: before.takenAt, to: after.takenAt, tables };
+}
+
+/**
+ * Key values can repeat even with a primary key: NULLs in a SQLite non-integer key, a disabled
+ * Oracle constraint, or values the driver rounded. Matching by key would then invent changes.
+ */
+function uniqueKeys(t: TableSnapshot): boolean {
+  const seen = new Set<string>();
+  for (const r of t.rows) {
+    const k = JSON.stringify(t.key.map((c) => r[c] ?? null));
+    if (seen.has(k)) return false;
+    seen.add(k);
+  }
+  return true;
 }
 
 function diffByKey(before: TableSnapshot, after: TableSnapshot, ignore: Set<string>): TableDiff {

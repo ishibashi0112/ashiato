@@ -97,6 +97,8 @@ td.changed { background: var(--upd-bg); }
 .arrow { color: var(--muted); margin: 0 4px; }
 .after { color: var(--ins); font-weight: 600; }
 .null { color: var(--muted); }
+.card.skipped { border-color: var(--upd); }
+.card.skipped ul { margin: 0; padding: 8px 12px 8px 28px; font-size: 13px; }
 .empty { display: grid; place-items: center; height: 100%; color: var(--muted); }
 @media (max-width: 720px) {
   main { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }

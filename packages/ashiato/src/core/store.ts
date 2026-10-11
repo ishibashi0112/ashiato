@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Session } from "./types.js";
 
@@ -9,7 +9,10 @@ export function sessionPath(dir: string, session: Session): string {
 
 export function saveSession(file: string, session: Session): void {
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(session, null, 2));
+  // write then rename, so a crash mid-write never leaves a half-written session file
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(session, null, 2));
+  renameSync(tmp, file);
 }
 
 export function loadSession(file: string): Session {

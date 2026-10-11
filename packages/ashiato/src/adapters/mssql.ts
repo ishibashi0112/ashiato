@@ -14,12 +14,15 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     port: url.port ? Number(url.port) : 1433,
     user: decodeURIComponent(url.username) || undefined,
     password: decodeURIComponent(url.password) || undefined,
-    database: url.pathname.replace(/^\//, "") || undefined,
+    database: decodeURIComponent(url.pathname.replace(/^\//, "")) || undefined,
+    // reading a large table can take longer than the 15s default
+    requestTimeout: Number(params.get("requestTimeout") ?? 120_000),
     options: {
       encrypt: params.get("encrypt") === "true",
       trustServerCertificate: params.get("trustServerCertificate") !== "false",
       instanceName: params.get("instance") ?? undefined,
-      readOnlyIntent: true,
+      // opt-in: routed to a readable secondary, snapshots could lag behind the app's writes
+      readOnlyIntent: params.get("applicationIntent")?.toLowerCase() === "readonly",
     },
   }).connect();
 

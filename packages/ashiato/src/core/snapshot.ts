@@ -16,18 +16,23 @@ export async function takeSnapshot(db: DbAdapter, tables: TableRef[], options: S
 
   for (const table of tables) {
     const id = table.schema ? `${table.schema}.${table.name}` : table.name;
-    let key = keyCache.get(id);
-    if (!key) {
-      key = await db.primaryKey(table);
-      keyCache.set(id, key);
+    let key = keyCache.get(id) ?? [];
+    try {
+      if (!keyCache.has(id)) {
+        key = await db.primaryKey(table);
+        keyCache.set(id, key);
+      }
+      const rowCount = await db.countRows(table);
+      if (rowCount > maxRows) {
+        result.push({ table, key, rows: [], rowCount, skipped: true });
+        continue;
+      }
+      const rows = await db.readRows(table);
+      result.push({ table, key, rows, rowCount: rows.length });
+    } catch (e) {
+      // one unreadable table (dropped, no permission...) must not stop the others from being recorded
+      result.push({ table, key, rows: [], rowCount: 0, skipped: true, error: (e as Error).message });
     }
-    const rowCount = await db.countRows(table);
-    if (rowCount > maxRows) {
-      result.push({ table, key, rows: [], rowCount, skipped: true });
-      continue;
-    }
-    const rows = await db.readRows(table);
-    result.push({ table, key, rows, rowCount: rows.length });
   }
 
   return { takenAt, tables: result };

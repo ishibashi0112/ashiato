@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import type { DbAdapter } from "../adapters/types.js";
 import { diffSnapshots, tableId } from "./diff.js";
 import { takeSnapshot } from "./snapshot.js";
-import type { ActionInfo, Session, Snapshot, Step, TableRef } from "./types.js";
+import type { ActionInfo, Session, SkippedTable, Snapshot, Step, TableRef, TableSnapshot } from "./types.js";
 
 export interface CheckpointOptions {
   action?: ActionInfo;
@@ -72,6 +72,7 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
     const started = performance.now();
     const next = await this.snapshot();
     const diff = diffSnapshots(this.last, next, { ignoreColumns: this.options.ignoreColumns });
+    const skipped = skippedBetween(this.last, next, this.options.maxRows ?? 100_000);
     this.last = next;
     if (options.dropIfEmpty && diff.tables.length === 0) return null;
     const step: Step = {
@@ -81,6 +82,7 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
       source,
       ...(options.action ? { action: options.action } : {}),
       diff,
+      ...(skipped.length ? { skipped } : {}),
       durationMs: Math.round(performance.now() - started),
     };
     this.session.steps.push(step);
@@ -89,13 +91,28 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
   }
 
   /** Tables that were too large to snapshot in the latest snapshot. */
-  skippedTables(): { table: TableRef; rowCount: number }[] {
-    return (this.last?.tables ?? []).filter((t) => t.skipped).map((t) => ({ table: t.table, rowCount: t.rowCount }));
+  skippedTables(): { table: TableRef; rowCount: number; error?: string }[] {
+    return (this.last?.tables ?? [])
+      .filter((t) => t.skipped)
+      .map((t) => ({ table: t.table, rowCount: t.rowCount, ...(t.error ? { error: t.error } : {}) }));
   }
 
   private snapshot(): Promise<Snapshot> {
     return takeSnapshot(this.db, this.watched, { maxRows: this.options.maxRows, keyCache: this.keyCache });
   }
+}
+
+/** Tables that couldn't be compared between two snapshots: skipped in either one. */
+function skippedBetween(before: Snapshot, after: Snapshot, maxRows: number): SkippedTable[] {
+  const prev = new Map(before.tables.map((t) => [tableId(t.table), t]));
+  const reason = (t: TableSnapshot) => (t.error ? `could not be read: ${t.error}` : `${t.rowCount} rows (more than max rows ${maxRows})`);
+  const out: SkippedTable[] = [];
+  for (const a of after.tables) {
+    const b = prev.get(tableId(a.table));
+    if (a.skipped) out.push({ table: a.table, reason: reason(a) });
+    else if (b?.skipped) out.push({ table: a.table, reason: "not read at the previous checkpoint, so nothing to compare with yet" });
+  }
+  return out;
 }
 
 export function selectTables(all: TableRef[], patterns?: string[]): TableRef[] {

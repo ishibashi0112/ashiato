@@ -3,20 +3,68 @@ import type { Row, TableRef } from "../core/types.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
+type OracleDb = typeof import("oracledb");
+
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
+const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+
+/** DATE / TIMESTAMP hold no time zone; the driver reads them as local time, so format them from the local fields. */
+const localText = (d: Date | null, ms: boolean) =>
+  d === null
+    ? null
+    : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
+      (ms ? `.${pad(d.getMilliseconds(), 3)}` : "");
+
+/** Exact NUMBER values: the driver's float would round large IDs and long decimals. Keeps plain numbers when exact. */
+const exactNumber = (raw: string | null) => {
+  if (raw === null) return null;
+  const s = raw.replace(/^(-?)\./, "$10."); // ".5" → "0.5"
+  const n = Number(s);
+  return String(n) === s ? n : s;
+};
+
+function fetchTypeHandler(oracledb: OracleDb) {
+  return (meta: import("oracledb").Metadata<unknown>) => {
+    switch (meta.dbType) {
+      case oracledb.DB_TYPE_NUMBER:
+        return { type: oracledb.STRING, converter: exactNumber as (v: unknown) => unknown };
+      case oracledb.DB_TYPE_DATE:
+        return { converter: ((d: Date | null) => localText(d, false)) as (v: unknown) => unknown };
+      case oracledb.DB_TYPE_TIMESTAMP:
+        return { converter: ((d: Date | null) => localText(d, true)) as (v: unknown) => unknown };
+      case oracledb.DB_TYPE_CLOB:
+      case oracledb.DB_TYPE_NCLOB:
+        return { type: oracledb.STRING };
+      case oracledb.DB_TYPE_BLOB:
+        return { type: oracledb.BUFFER };
+      default:
+        return undefined;
+    }
+  };
+}
 
 /** oracle://user:password@host:1521/serviceName?schema=OWNER — uses node-oracledb Thin mode (no Instant Client needed). */
 export async function connectOracle(url: URL): Promise<DbAdapter> {
-  const oracledb = await loadDriver<typeof import("oracledb")>("oracledb", "Oracle");
-  oracledb.fetchAsString = [oracledb.CLOB];
-  oracledb.fetchAsBuffer = [oracledb.BLOB];
-  const conn = await oracledb.getConnection({
+  const oracledb = await loadDriver<OracleDb>("oracledb", "Oracle");
+  // a pool of one checks the connection before use and reconnects after a restart or idle timeout
+  const pool = await oracledb.createPool({
     user: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
-    connectString: `${url.hostname}:${url.port || 1521}${url.pathname}`,
+    connectString: `${url.hostname}:${url.port || 1521}${decodeURIComponent(url.pathname)}`,
+    poolMin: 0,
+    poolMax: 1,
+    poolPingInterval: 10,
   });
-  const exec = async (sql: string, binds: Record<string, string> = {}) =>
-    ((await conn.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT })).rows ?? []) as Record<string, unknown>[];
+  const handler = fetchTypeHandler(oracledb);
+  const exec = async (sql: string, binds: Record<string, string> = {}) => {
+    const conn = await pool.getConnection();
+    try {
+      const res = await conn.execute(sql, binds, { outFormat: oracledb.OUT_FORMAT_OBJECT, fetchTypeHandler: handler });
+      return (res.rows ?? []) as Record<string, unknown>[];
+    } finally {
+      await conn.close();
+    }
+  };
 
   const owner =
     url.searchParams.get("schema")?.toUpperCase() ??
@@ -26,8 +74,11 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
   return {
     dialect: "oracle",
     async listTables() {
+      // IOT overflow segments are listed too but can't be queried (ORA-25191)
       const rows = await exec(
-        "SELECT OWNER, TABLE_NAME FROM ALL_TABLES WHERE OWNER = :owner AND NESTED = 'NO' AND SECONDARY = 'N' ORDER BY TABLE_NAME",
+        `SELECT OWNER, TABLE_NAME FROM ALL_TABLES
+          WHERE OWNER = :owner AND NESTED = 'NO' AND SECONDARY = 'N' AND (IOT_TYPE IS NULL OR IOT_TYPE = 'IOT')
+          ORDER BY TABLE_NAME`,
         { owner },
       );
       return rows.map((r) => ({ schema: String(r.OWNER), name: String(r.TABLE_NAME) }));
@@ -50,7 +101,7 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
       return (await exec(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
     },
     async close() {
-      await conn.close();
+      await pool.close(0);
     },
   };
 }
