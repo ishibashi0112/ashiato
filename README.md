@@ -23,8 +23,8 @@ Checking that "Save" really wrote the right rows usually means a pile of hand-wr
 ```sh
 npm install -D ashiato mssql   # plus the driver for your database: mssql | oracledb | pg | mysql2 (SQLite needs nothing)
 
-npx ashiato tables --db "mssql://user:pass@localhost:1433/devdb?encrypt=false"
-npx ashiato record --db "mssql://user:pass@localhost:1433/devdb?encrypt=false" --tables orders,stock --ignore-columns updated_at
+npx ashiato tables --db "mssql://user:pass@localhost:1433/devdb"
+npx ashiato record --db "mssql://user:pass@localhost:1433/devdb" --tables orders,stock --ignore-columns updated_at
 ```
 
 Then use your app. After each action, press **Enter** in the terminal (type a label first if you like) or click **Checkpoint** in the timeline at <http://127.0.0.1:4100>.
@@ -83,7 +83,7 @@ Select a step in the timeline and the **Screen** panel shows what the screen loo
 
 | Database | URL | Driver |
 | --- | --- | --- |
-| SQL Server | `mssql://user:pass@host:1433/db?encrypt=false&instance=SQLEXPRESS` | `mssql` |
+| SQL Server | `mssql://user:pass@host:1433/db?instance=SQLEXPRESS` (options: `encrypt=true`, `applicationIntent=ReadOnly`, `requestTimeout=120000`) | `mssql` |
 | Oracle | `oracle://user:pass@host:1521/service?schema=OWNER` | `oracledb` (Thin mode, no Instant Client) |
 | PostgreSQL | `postgres://user:pass@host:5432/db` | `pg` |
 | MySQL / MariaDB | `mysql://user:pass@host:3306/db` | `mysql2` |
@@ -123,7 +123,9 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 - Changes are compared between checkpoints, so a row changed twice between two checkpoints shows only the final result.
 - On a shared development database, other people's changes during the same moment are included.
 - Tables without a primary key are compared row by row, so an update appears as a delete plus an insert.
-- Each checkpoint reads the watched tables in full. Use `--tables` to keep it fast; large tables are skipped above `--max-rows`.
+- Each checkpoint reads the watched tables in full. Use `--tables` to keep it fast; large tables are skipped above `--max-rows`. A step lists any table it could not compare (too large, or unreadable).
+- Tables are chosen when recording starts; tables created later are not watched.
+- Oracle `TIMESTAMP` values are compared to the millisecond.
 
 ## Roadmap
 
@@ -158,8 +160,8 @@ node packages/ashiato/dist/bin.js record --db sqlite:./dev.db
 ```sh
 npm install -D ashiato mssql   # 使うDBのドライバーも一緒に: mssql | oracledb | pg | mysql2(SQLiteは不要)
 
-npx ashiato tables --db "mssql://user:pass@localhost:1433/devdb?encrypt=false"
-npx ashiato record --db "mssql://user:pass@localhost:1433/devdb?encrypt=false" --tables orders,stock --ignore-columns updated_at
+npx ashiato tables --db "mssql://user:pass@localhost:1433/devdb"
+npx ashiato record --db "mssql://user:pass@localhost:1433/devdb" --tables orders,stock --ignore-columns updated_at
 ```
 
 アプリを操作し、操作ごとにターミナルで **Enter** を押します(先にラベルを入力しても構いません)。タイムライン画面 <http://127.0.0.1:4100> の **Checkpoint** ボタンでも記録できます。**Ctrl+C** で終了すると、セッションが `.ashiato/sessions/` に保存されます。あとから `ashiato show <ファイル>` で見返せます。
@@ -195,7 +197,9 @@ export default defineConfig({
 - チェックポイント間の比較なので、その間に同じ行が2回変わった場合は最終結果だけが見えます
 - 共有の開発DBでは、同じ時間帯に他の人が行った変更も含まれます
 - 主キーのないテーブルは行全体で比較するため、更新は「削除+追加」として表示されます
-- チェックポイントのたびに対象テーブルを全件読みます。`--tables` で対象を絞ってください。`--max-rows` を超えるテーブルはスキップします
+- チェックポイントのたびに対象テーブルを全件読みます。`--tables` で対象を絞ってください。`--max-rows` を超えるテーブルはスキップし、比較できなかったテーブル(大きすぎる・読めない)は各ステップに表示します
+- 対象テーブルは記録開始時に決まります。開始後に作られたテーブルは対象外です
+- Oracle の `TIMESTAMP` はミリ秒単位で比較します
 
 ### ロードマップ
 

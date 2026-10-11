@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ScreenPanel, type ReplayTabs } from "./Screen";
 import type { ActionInfo, JsonValue, Row, Step, TableDiff, VideoInfo } from "./types";
 
-const tableName = (t: TableDiff) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
+const tableName = (t: { table: TableDiff["table"] }) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
 const show = (v: JsonValue | undefined) => (v === null || v === undefined ? <i className="null">NULL</i> : String(v));
 
 function columnsOf(rows: Row[]): string[] {
@@ -24,6 +24,18 @@ export function StepDetail({ step, replay, videos }: { step: Step; replay: Repla
       {step.action && <ActionCard action={step.action} />}
       {step.source === "sync" && (
         <p className="hint">These rows changed while no action was running (another user, a batch job, or the app itself).</p>
+      )}
+      {step.skipped && step.skipped.length > 0 && (
+        <div className="card skipped">
+          <h3>Not compared in this step</h3>
+          <ul>
+            {step.skipped.map((s) => (
+              <li key={tableName(s)}>
+                <b>{tableName(s)}</b> {s.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {step.diff.tables.length === 0 && <p className="hint">No rows changed in the watched tables.</p>}
       {step.diff.tables.map((t) => (

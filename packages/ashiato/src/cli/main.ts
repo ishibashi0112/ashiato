@@ -22,7 +22,7 @@ Usage:
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
                           sqlite:./dev.db
-                          mssql://user:pass@host:1433/db?encrypt=false
+                          mssql://user:pass@host:1433/db?instance=SQLEXPRESS
                           oracle://user:pass@host:1521/service?schema=OWNER
                           postgres://user:pass@host:5432/db
                           mysql://user:pass@host:3306/db
@@ -103,12 +103,16 @@ export async function main(argv: string[]): Promise<void> {
 
   console.log(`Watching ${session.tables.length} table(s) on ${db.dialect}. Baseline snapshot taken.`);
   for (const s of recorder.skippedTables()) {
-    console.log(`  skipped ${tableId(s.table)} (${s.rowCount} rows > --max-rows)`);
+    console.log(`  skipped ${tableId(s.table)} (${s.error ? `could not be read: ${s.error}` : `${s.rowCount} rows > --max-rows`})`);
   }
 
+  // tables that stay skipped (too large) are reported again only when the set changes
+  let lastSkipped = JSON.stringify(recorder.skippedTables().map((s) => tableId(s.table)));
   recorder.on("step", (step: Step) => {
     saveSession(file, session);
-    console.log(formatStep(step));
+    const skipped = JSON.stringify((step.skipped ?? []).map((s) => tableId(s.table)));
+    console.log(formatStep(step, 5, skipped !== lastSkipped));
+    lastSkipped = skipped;
   });
 
   if (!values["no-ui"]) {

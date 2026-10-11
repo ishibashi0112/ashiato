@@ -47,6 +47,8 @@ jobs:
       ASHIATO_TEST_MYSQL_URL: mysql://root:ashiato@127.0.0.1:3306/ashiato
       ASHIATO_TEST_MSSQL_URL: mssql://sa:Ashiato%232026@127.0.0.1:1433/master
       ASHIATO_TEST_ORACLE_URL: oracle://ashiato:ashiato@127.0.0.1:1521/FREEPDB1
+      # creates the SELECT-only user the Oracle test connects as
+      ASHIATO_TEST_ORACLE_ADMIN_URL: oracle://system:ashiato@127.0.0.1:1521/FREEPDB1
       ASHIATO_REQUIRE_E2E: "1"
     steps:
       - uses: actions/checkout@v4

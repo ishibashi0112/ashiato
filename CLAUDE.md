@@ -12,5 +12,5 @@ Records which rows an app inserts, updates and deletes, using read-only (SELECT-
 - `packages/ui` — React timeline UI (step list, diffs, rrweb replay, screen recording via getDisplayMedia), built into `packages/ashiato/dist/ui`.
 
 ## Commands
-- `pnpm test` — unit + SQLite tests. Real servers run when `ASHIATO_TEST_{POSTGRES,MYSQL,MSSQL,ORACLE}_URL` is set (CI sets all four). The real-browser Vite test (`test/vite.e2e.test.ts`, also covers the timeline UI replay and screen recording) needs `pnpm build` first and a Chromium for playwright-core; CI sets `ASHIATO_REQUIRE_E2E=1` so it can't silently skip.
+- `pnpm test` — unit + SQLite tests. Real servers run when `ASHIATO_TEST_{POSTGRES,MYSQL,MSSQL,ORACLE}_URL` is set (CI sets all four). The adapter test connects as a user granted only SELECT (Oracle also needs `ASHIATO_TEST_ORACLE_ADMIN_URL`), so permission-dependent catalog queries are covered. The real-browser Vite test (`test/vite.e2e.test.ts`, also covers the timeline UI replay and screen recording) needs `pnpm build` first and a Chromium for playwright-core; CI sets `ASHIATO_REQUIRE_E2E=1` so it can't silently skip.
 - `pnpm typecheck`, `pnpm build`

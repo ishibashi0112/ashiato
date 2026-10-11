@@ -6,43 +6,73 @@ import type { DbAdapter } from "./types.js";
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
 
+/**
+ * Types read as the server's text instead of being parsed: dates and times (pg's Date drops
+ * microseconds and shifts DATE / TIMESTAMP by the local time zone), intervals, and JSON.
+ * date, time, timestamp, timestamptz, timetz, interval, json, jsonb, and their arrays.
+ */
+const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807]);
+
 export async function connectPostgres(url: URL): Promise<DbAdapter> {
   const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
-  const client = new pg.Client({ connectionString: url.toString() });
-  await client.connect();
-  await client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY");
-  const query = async (sql: string, params: unknown[] = []) => (await client.query(sql, params)).rows as Record<string, unknown>[];
+  // A pool of one reconnects by itself when the server drops the connection (restart, idle timeout).
+  const pool = new pg.Pool({
+    connectionString: url.toString(),
+    max: 1,
+    idleTimeoutMillis: 0,
+    types: {
+      getTypeParser: ((oid: number, format?: "text" | "binary") =>
+        RAW_TYPES.has(oid) ? (v: string) => v : pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
+    },
+  });
+  // Without a listener, an idle connection being closed by the server would crash the process.
+  pool.on("error", () => undefined);
+  const query = async (sql: string, params: unknown[] = []) => (await pool.query(sql, params)).rows as Record<string, unknown>[];
+  await query("SELECT 1");
+
+  // Partitioned parents already return their partitions' rows; plain tables are read with ONLY so
+  // rows of inheriting child tables aren't counted twice. Filled by listTables (the recorder calls it first).
+  const partitioned = new Set<string>();
+  const from = (t: TableRef) => (partitioned.has(name(t)) ? name(t) : `ONLY ${name(t)}`);
 
   return {
     dialect: "postgres",
     async listTables() {
+      // pg_catalog rather than information_schema, which hides constraints from SELECT-only users
       const rows = await query(
-        `SELECT table_schema, table_name FROM information_schema.tables
-          WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema')
-          ORDER BY table_schema, table_name`,
+        `SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relpersistence <> 't'
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%'
+            AND has_table_privilege(c.oid, 'SELECT')
+          ORDER BY 1, 2`,
       );
-      return rows.map((r) => ({ schema: String(r.table_schema), name: String(r.table_name) }));
+      return rows.map((r) => {
+        const t = { schema: String(r.schema), name: String(r.name) };
+        if (r.kind === "p") partitioned.add(name(t));
+        return t;
+      });
     },
     async primaryKey(t) {
       const rows = await query(
-        `SELECT k.column_name
-           FROM information_schema.table_constraints c
-           JOIN information_schema.key_column_usage k
-             ON k.constraint_name = c.constraint_name AND k.constraint_schema = c.constraint_schema
-          WHERE c.constraint_type = 'PRIMARY KEY' AND c.table_schema = $1 AND c.table_name = $2
-          ORDER BY k.ordinal_position`,
+        `SELECT a.attname AS column_name
+           FROM pg_constraint c
+           CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+          WHERE c.contype = 'p' AND c.conrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass
+          ORDER BY k.ord`,
         [t.schema ?? "public", t.name],
       );
       return rows.map((r) => String(r.column_name));
     },
     async countRows(t) {
-      return Number((await query(`SELECT COUNT(*) AS n FROM ${name(t)}`))[0]?.n ?? 0);
+      return Number((await query(`SELECT COUNT(*) AS n FROM ${from(t)}`))[0]?.n ?? 0);
     },
     async readRows(t): Promise<Row[]> {
-      return (await query(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
+      return (await query(`SELECT * FROM ${from(t)}`)).map(normalizeRow);
     },
     async close() {
-      await client.end();
+      await pool.end();
     },
   };
 }
