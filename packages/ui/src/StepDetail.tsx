@@ -39,7 +39,8 @@ export function StepDetail({ step, replay, videos }: { step: Step; replay: Repla
       )}
       {step.diff.tables.length === 0 && <p className="hint">No rows changed in the watched tables.</p>}
       {step.diff.tables.map((t) => (
-        <TableCard key={tableName(t)} t={t} />
+        // keyed by step too: "Show all" must not carry over to the same table in the next step selected
+        <TableCard key={`${step.id}:${tableName(t)}`} t={t} />
       ))}
     </div>
   );

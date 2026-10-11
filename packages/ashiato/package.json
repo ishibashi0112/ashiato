@@ -50,10 +50,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
+    "prepack": "node -e \"for (const f of ['README.md', 'LICENSE']) require('fs').copyFileSync('../../' + f, f)\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

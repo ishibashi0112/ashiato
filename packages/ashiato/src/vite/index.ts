@@ -12,7 +12,7 @@ export interface AshiatoViteOptions {
   oneWayMs?: number;
   /** Checkpoint before each action's first request so outside changes aren't attributed to it. Default true. */
   syncBefore?: boolean;
-  /** URL substrings never tracked (e.g. a long-polling endpoint). */
+  /** URL substrings never tracked (e.g. a long-polling endpoint, or one polled faster than settleMs). */
   ignore?: string[];
   /** Events this close together, before any request, count as one action. Default 300ms. */
   mergeMs?: number;
@@ -20,7 +20,7 @@ export interface AshiatoViteOptions {
   attachMs?: number;
   /** Longest wait for the checkpoint taken before an action's first request. Default 5000ms. */
   syncTimeoutMs?: number;
-  /** A request still open after this long is recorded as "no reply" so its action gets a checkpoint. Default 30000ms. */
+  /** A request still open after this long is recorded as "no reply" so its action gets a checkpoint; an action this old takes no new requests. Default 30000ms. */
   maxRequestMs?: number;
   /**
    * Record the page (DOM, not pixels) so the timeline can replay the screen around each action.
@@ -59,6 +59,7 @@ export default function ashiato(options: AshiatoViteOptions = {}): Plugin {
     ignore: options.ignore,
     replay: options.replay,
   };
+  const json = JSON.stringify(config).replace(/</g, "\\u003c");
   let code: string | undefined;
   let base = "/";
 
@@ -75,20 +76,18 @@ export default function ashiato(options: AshiatoViteOptions = {}): Plugin {
         code ??= clientCode();
         res.setHeader("Content-Type", "text/javascript; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache");
-        res.end(code);
+        // "use strict" first: the bundle's own directive stops being one once something precedes it
+        res.end(`"use strict";window.__ASHIATO__=${json};\n${code}`);
       });
     },
     transformIndexHtml() {
       if (!enabled) return;
       code ??= clientCode(); // fail early and clearly if the package wasn't built
-      // First in <head>, as classic (blocking) scripts: they run before the app's modules, so
-      // fetch / XHR / postMessage are wrapped before the app touches them. The script itself is
-      // served from the dev server (CSP 'self'), keeping <meta charset> within the first bytes.
-      const json = JSON.stringify(config).replace(/</g, "\\u003c");
-      return [
-        { tag: "script", attrs: { "data-ashiato": "" }, children: `window.__ASHIATO__=${json};`, injectTo: "head-prepend" },
-        { tag: "script", attrs: { src: `${base}${CLIENT_PATH}`, "data-ashiato": "" }, injectTo: "head-prepend" },
-      ];
+      // First in <head>, as a classic (blocking) script: it runs before the app's modules, so
+      // fetch / XHR / postMessage are wrapped before the app touches them. It is served from the
+      // dev server with its config, nothing inline, so a CSP of script-src 'self' allows it; the
+      // short tag also keeps <meta charset> within the first bytes.
+      return [{ tag: "script", attrs: { src: `${base}${CLIENT_PATH}`, "data-ashiato": "" }, injectTo: "head-prepend" }];
     },
   };
 }

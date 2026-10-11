@@ -25,7 +25,10 @@ export interface TrackerOptions {
   syncBefore?: boolean;
   /** Upper bound for how long a request waits for the sync checkpoint. Default 5000ms. */
   syncTimeoutMs?: number;
-  /** A request still open after this long is ended as "no reply", so its action gets its checkpoint. Default 30000ms. */
+  /**
+   * A request still open after this long is ended as "no reply", so its action gets its checkpoint.
+   * An action this old takes no new requests, so a fast poller can't keep it open. Default 30000ms.
+   */
   maxRequestMs?: number;
   /** Browser tab id recorded with each action (matches the tab's screen replay). */
   tab?: string;
@@ -80,6 +83,8 @@ export class Tracker {
   private gate: Gate = { promise: Promise.resolve(), open: true };
   /** Set during the task that handled a user event: its requests belong to it even after a long confirm(). */
   private inUserTask = false;
+  /** A sync checkpoint timed out and hasn't been answered yet (the recorder hangs): later actions don't wait for one. */
+  private syncStuck = false;
   private readonly o: Required<Omit<TrackerOptions, "send" | "tab">> & Pick<TrackerOptions, "send" | "tab">;
 
   constructor(options: TrackerOptions) {
@@ -131,11 +136,14 @@ export class Tracker {
     this.current = this.newAction(type, target, false);
   }
 
-  beginRequest(req: RequestInfo): RequestHandle {
+  /** `onEnd` runs once the request has ended, whether by `end()` or by the maxRequestMs cap. */
+  beginRequest(req: RequestInfo, onEnd?: () => void): RequestHandle {
     let action = this.current;
     const stale =
       action && action.info.requests.length === 0 && !this.inUserTask && this.o.now() - action.started > this.o.attachMs;
-    if (!action || action.done || stale) {
+    // requests arriving less than settleMs apart (a fast poller) would never let the action settle
+    const tooOld = action && !this.inUserTask && this.o.now() - action.started > this.o.maxRequestMs;
+    if (!action || action.done || stale || tooOld) {
       action = this.current = this.newAction("request", undefined, true);
     }
     if (action.settleTimer !== undefined) {
@@ -160,6 +168,7 @@ export class Tracker {
       Object.assign(entry, result, { durationMs: this.o.now() - started });
       a.inflight.delete(open);
       if (a.inflight.size === 0) a.settleTimer = this.o.setTimer(() => this.finish(a), this.o.settleMs);
+      onEnd?.();
     };
     const cap = this.o.setTimer(() => end({ error: `no reply after ${Math.round(this.o.maxRequestMs / 1000)}s` }), this.o.maxRequestMs);
     return { ready: gate.promise, waiting: !gate.open, end };
@@ -197,9 +206,20 @@ export class Tracker {
   private syncFor(action: Action): Gate {
     const othersBusy = [...this.active].some((a) => a !== action && this.busy(a));
     this.active.add(action);
-    if (!this.o.syncBefore || othersBusy) return this.gate;
+    if (!this.o.syncBefore || othersBusy || this.syncStuck) return this.gate;
     const sync = this.send({ label: "outside actions", source: "sync", dropIfEmpty: true });
-    const timeout = new Promise<void>((r) => this.o.setTimer(r, this.o.syncTimeoutMs));
+    let answered = false;
+    void sync.then(() => {
+      answered = true;
+      this.syncStuck = false;
+    });
+    const timeout = new Promise<void>((r) =>
+      this.o.setTimer(() => {
+        // a recorder that accepts the request but never answers would make every action wait the full timeout
+        if (!answered) this.syncStuck = true;
+        r();
+      }, this.o.syncTimeoutMs),
+    );
     const gate: Gate = { promise: Promise.race([sync, timeout]), open: false };
     void gate.promise.then(() => (gate.open = true));
     return (this.gate = gate);

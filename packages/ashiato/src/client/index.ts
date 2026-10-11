@@ -46,15 +46,23 @@ function install(win: Window & typeof globalThis): void {
   const post = async (path: string, body: string, keepalive = false): Promise<unknown> => {
     if (Date.now() < downUntil) return;
     try {
-      const res = await originalFetch(`${recorder}${path}`, { method: "POST", headers: { "content-type": "text/plain" }, body, keepalive });
+      const res = await originalFetch(`${recorder}${path}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body,
+        keepalive,
+        // a recorder that accepts the connection but never answers counts as down, instead of holding up every later checkpoint
+        signal: AbortSignal.timeout(120_000),
+      });
       if (!res.ok) {
         // 404 / 405: a read-only `ashiato show`, or another server, on the recorder's port
         if (res.status === 404 || res.status === 405) downUntil = Date.now() + RETRY_MS;
         const message = `[ashiato] recorder answered HTTP ${res.status} for ${path}: ${await res.text()}`;
         if (!rejected.has(message)) console.warn(message);
         rejected.add(message);
+      } else if (res.headers.get("content-type")?.startsWith("application/json")) {
+        return (await res.json().catch(() => undefined)) as unknown;
       }
-      else if (res.headers.get("content-type")?.startsWith("application/json")) return (await res.json().catch(() => undefined)) as unknown;
     } catch (e) {
       downUntil = Date.now() + RETRY_MS;
       if (!warned) {

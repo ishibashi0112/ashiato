@@ -61,7 +61,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     vite = await createServer({
       root: fileURLToPath(new URL("./fixtures/app", import.meta.url)),
       logLevel: "silent",
-      server: { port: 0, host: "127.0.0.1" },
+      // the app allows only its own scripts: the client and its config must not need an inline script
+      server: { port: 0, host: "127.0.0.1", headers: { "Content-Security-Policy": "script-src 'self'" } },
       plugins: [
         ashiato({ recorder: recorderUrl, settleMs: 50 }),
         {
@@ -85,6 +86,17 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
                 app.db.exec("INSERT INTO orders (id, customer_id, qty, updated_at) VALUES (2, 8, 1, 'now')");
                 return send({ ok: true });
               }
+              if (req.url === "/api/items" && req.method === "POST") {
+                let body = "";
+                req.on("data", (chunk) => (body += chunk));
+                req.on("end", () => {
+                  const { id } = JSON.parse(body) as { id: number };
+                  app.db.prepare("INSERT OR IGNORE INTO orders (id, customer_id, qty, updated_at) VALUES (?, 9, 1, 'now')").run(id);
+                  send({ id });
+                });
+                return;
+              }
+              if (req.url === "/api/slow") return void setTimeout(() => send({ ok: true }), 2000);
               next();
             });
           },
@@ -97,6 +109,11 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     browser = await chromium!.launch();
     closers.push(() => browser.close());
     page = await browser.newPage();
+    await page.addInitScript(() => {
+      const violations: string[] = [];
+      (window as unknown as { cspViolations: string[] }).cspViolations = violations;
+      document.addEventListener("securitypolicyviolation", (e) => violations.push(`${e.violatedDirective} ${e.blockedURI}`));
+    });
     // A stand-in for WebView2's chrome.webview: forwards JSON-RPC calls to the fixture backend.
     // Runs before the page (and before ashiato's script), like the real one.
     await page.addInitScript(() => {
@@ -125,8 +142,10 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
   };
   const table = (step: Step, name: string) => step.diff.tables.find((t) => t.table.name === name);
 
-  it("injects the client into the page", async () => {
+  it("injects the client into the page, within the page's Content-Security-Policy", async () => {
     expect(await page.evaluate(() => (window as unknown as { __ashiatoInstalled?: boolean }).__ashiatoInstalled)).toBe(true);
+    expect(await page.evaluate(() => window.__ASHIATO__?.recorder)).toBe(recorderUrl);
+    expect(await page.evaluate(() => (window as unknown as { cspViolations: string[] }).cspViolations)).toEqual([]);
   });
 
   it("turns a click and its requests into one checkpoint", async () => {
@@ -161,6 +180,19 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     expect(step.source).toBe("orders.save");
     expect(step.action?.requests[0]).toMatchObject({ kind: "rpc", method: "orders.save" });
     expect(table(step, "orders")?.inserted[0]?.id).toBe(2);
+  });
+
+  it("sends each request with its own arguments while it waits for the sync checkpoint", async () => {
+    await page.getByRole("button", { name: "まとめて保存" }).click();
+    const step = await stepNamed('click button "まとめて保存"');
+    expect(step.action?.requests.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(table(step, "orders")?.inserted.map((r) => r.id).sort()).toEqual([11, 12, 13]);
+  });
+
+  it("ends an XHR request cancelled by re-opening it, instead of waiting for the 30s cap", async () => {
+    await page.getByRole("button", { name: "XHR中止" }).click();
+    const step = await stepNamed('click button "XHR中止"');
+    expect(step.action?.requests).toMatchObject([{ method: "POST", url: "/api/slow", error: "aborted" }]);
   });
 
   const replayEvents = async () => {
