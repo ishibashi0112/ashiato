@@ -344,7 +344,13 @@ export class Tracker {
         // the writes that began before this action have been sent now
         due = began + Tracker.held(this.sentWrites(action));
         this.waiters.add(check);
-        wait = this.o.setTimer(check, Math.max(0, due - this.o.now()));
+        wait = this.o.setTimer(
+          () => {
+            due = -Infinity; // a clock a little behind the timer mustn't leave it waiting
+            check();
+          },
+          Math.max(0, due - this.o.now()),
+        );
         check();
       });
     });
@@ -355,7 +361,9 @@ export class Tracker {
    * of another action taken as this one began serves as well.
    */
   private sync(action: Action, deadline: number): Promise<void> {
-    let sent = action.before && !action.before.answered ? action.before : undefined;
+    // only for a request sent right after the click (not after a confirm(), where others may change data
+    // meanwhile), and behind every checkpoint queued since
+    let sent = action.before && !action.before.answered && this.o.now() - action.started <= this.o.mergeMs ? this.last : undefined;
     // actions done writing but still reading or settling: their checkpoint first, or their changes would land in this one's step
     for (const a of [...this.active]) if (a !== action && this.doneWriting(a)) sent = this.checkpointNow(a);
     // one not handed to the recorder yet reads the tables after this point too
@@ -398,9 +406,9 @@ export class Tracker {
     if (!action.sync) return void (action.done = true); // only read, with no user action: no checkpoint
     // Another action has writes the database may already hold: a checkpoint now would take them into
     // this action's step (and a poll's GET would get a click's changes). The two become one step, taken
-    // when that one is done. For an action that only read, also one whose writes wait for their sync:
-    // they go out before a checkpoint queued now is taken.
-    const other = [...this.active].find((a) => a !== action && (this.unrecorded(a) || (!action.writes && this.held(a))));
+    // when that one is done. Also one whose writes wait for their sync: they go out before a checkpoint
+    // queued now is taken.
+    const other = [...this.active].find((a) => a !== action && (this.unrecorded(a) || this.held(a)));
     // one older than maxRequestMs takes its checkpoint anyway: writes that keep overlapping each
     // other (a heartbeat message) would otherwise put it off for good
     if (other && this.o.now() - action.started <= this.o.maxRequestMs) return void this.merge(action, other);
@@ -414,14 +422,14 @@ export class Tracker {
 
   /**
    * `from` is over; its requests join `into`, which takes one checkpoint for both. The step is named
-   * after the action that wrote, the one not held open by a long write, the user's, or else the earlier one.
+   * after the action that wrote, the user's, the one not held open by a long write, or else the earlier one.
    */
   private merge(from: Action, into: Action): void {
     from.done = true;
     if (from.settleTimer !== undefined) this.o.clearTimer(from.settleTimer);
     from.settleTimer = undefined;
     this.active.delete(from);
-    const rank = (a: Action) => (a.writes ? 0 : 4) + (a.slow ? 2 : 0) + (a.synthetic ? 1 : 0);
+    const rank = (a: Action) => (a.writes ? 0 : 4) + (a.synthetic ? 2 : 0) + (a.slow ? 1 : 0);
     const earlier = from.started <= into.started;
     const requests = earlier ? [...from.info.requests, ...into.info.requests] : [...into.info.requests, ...from.info.requests];
     if (rank(from) < rank(into) || (rank(from) === rank(into) && earlier)) {
