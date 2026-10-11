@@ -82,8 +82,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
 
   if (url.pathname === "/api/checkpoint" && req.method === "POST") {
     if (!o.checkpoint) return sendJson(res, 405, { error: "This session is read-only" });
-    const body = (await readJson(req)) as { label?: string; source?: string; action?: ActionInfo; dropIfEmpty?: boolean };
-    const step = await o.checkpoint(body.label?.trim() || "checkpoint", body.source ?? "http", {
+    const body = (await readJson(req)) as { label?: unknown; source?: unknown; action?: ActionInfo; dropIfEmpty?: boolean };
+    const label = typeof body.label === "string" ? body.label.trim() : "";
+    const step = await o.checkpoint(label || "checkpoint", typeof body.source === "string" ? body.source : "http", {
       action: body.action,
       dropIfEmpty: body.dropIfEmpty === true,
     });
@@ -185,7 +186,13 @@ function serveRange(req: IncomingMessage, res: ServerResponse, file: { path: str
 }
 
 function serveStatic(res: ServerResponse, root: string, pathname: string) {
-  const rel = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, "");
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    throw new HttpError(400, "Bad URL");
+  }
+  const rel = normalize(decoded).replace(/^([/\\])+/, "");
   let file = join(root, rel || "index.html");
   if (!file.startsWith(root) || !existsSync(file) || extname(file) === "") file = join(root, "index.html");
   if (!existsSync(file)) return sendJson(res, 404, { error: "UI is not built. Run `pnpm build`." });
@@ -212,9 +219,12 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 /** Parses a JSON body whatever its content-type (the browser script sends text/plain to skip the CORS preflight). */
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const text = (await readBody(req)).toString("utf8");
+  let body: unknown;
   try {
-    return text ? JSON.parse(text) : {};
+    body = text ? JSON.parse(text) : {};
   } catch {
     throw new HttpError(400, "Request body is not valid JSON");
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) throw new HttpError(400, "Request body must be a JSON object");
+  return body;
 }

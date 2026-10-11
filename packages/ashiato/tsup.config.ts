@@ -12,7 +12,9 @@ export default defineConfig([
   {
     ...node,
     entry: { index: "src/index.ts", bin: "src/cli/bin.ts", vite: "src/vite/index.ts" },
-    format: ["esm"],
+    // CommonJS too: a vite.config.ts in a project without "type": "module" is bundled as CJS and require()s plugins
+    format: ["esm", "cjs"],
+    shims: true,
     dts: { entry: { index: "src/index.ts", vite: "src/vite/index.ts" } },
     // dist/ui is built separately by @ashiato/ui
     clean: ["**/*", "!ui/**", "!client.global.js"],

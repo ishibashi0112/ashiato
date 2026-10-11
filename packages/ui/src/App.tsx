@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { loadReplay, useScreenRecorder, type ReplayTabs } from "./Screen";
 import { StepDetail } from "./StepDetail";
 import type { Session, Step, VideoInfo } from "./types";
@@ -22,7 +22,10 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString();
 export function App() {
   const [session, setSession] = useState<LiveSession>();
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const [selected, setSelected] = useState<number>();
+  /** The newest step id: new steps are followed only while the user is looking at the newest one. */
+  const latest = useRef<number | undefined>(undefined);
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [hideEmpty, setHideEmpty] = useState(false);
@@ -45,18 +48,40 @@ export function App() {
   useEffect(() => {
     let es: EventSource | undefined;
     let cancelled = false;
-    fetch("api/session")
-      .then((r) => r.json() as Promise<LiveSession>)
+    let sessionId: string | undefined;
+    const follow = (id: number | undefined) => {
+      // read now: React runs the updater later, after latest.current has moved on
+      const wasLatest = latest.current;
+      latest.current = id;
+      setSelected((prev) => (prev === undefined || prev === wasLatest ? id : prev));
+    };
+    // (re)loads the whole session: at start, and whenever the event stream (re)connects, so steps
+    // taken in between aren't missed and a restarted recorder's new session replaces the old one
+    const load = () =>
+      fetch("api/session")
+        .then((r) => r.json() as Promise<LiveSession>)
+        .then((s) => {
+          if (cancelled) return s;
+          if (sessionId !== undefined && sessionId !== s.id) latest.current = undefined;
+          if (sessionId !== s.id) setSelected(undefined);
+          sessionId = s.id;
+          setSession(s);
+          follow(s.steps.at(-1)?.id);
+          return s;
+        });
+    load()
       .then((s) => {
-        if (cancelled) return;
-        setSession(s);
-        setSelected(s.steps.at(-1)?.id);
-        if (!s.live) return;
+        if (cancelled || !s.live) return;
         es = new EventSource("api/events");
+        let opened = false;
+        es.addEventListener("open", () => {
+          if (opened) void load().then(() => setReplayVersion((v) => v + 1)).catch(() => undefined);
+          opened = true;
+        });
         es.addEventListener("step", (e) => {
           const step = JSON.parse((e as MessageEvent<string>).data) as Step;
           setSession((prev) => (prev && !prev.steps.some((x) => x.id === step.id) ? { ...prev, steps: [...prev.steps, step] } : prev));
-          setSelected(step.id);
+          follow(step.id);
           // the page sends its replay events every second: fetch them once this action's have arrived
           setTimeout(() => setReplayVersion((v) => v + 1), 1500);
         });
@@ -85,8 +110,10 @@ export function App() {
       });
       if (!res.ok) throw new Error(((await res.json()) as { error: string }).error);
       setLabel("");
+      setNotice(undefined);
     } catch (err) {
-      setError((err as Error).message);
+      // keep the timeline on screen: the recorder may just have failed one read
+      setNotice(`Checkpoint failed: ${(err as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -109,6 +136,7 @@ export function App() {
           </button>
         )}
         {screen.error && <span className="del small">{screen.error}</span>}
+        {notice && <span className="del small">{notice}</span>}
         {session.live && (
           <form onSubmit={checkpoint} className="checkpoint">
             <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. click Save)" />

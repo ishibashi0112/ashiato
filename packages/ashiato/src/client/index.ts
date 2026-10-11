@@ -11,6 +11,10 @@ interface ClientConfig {
   settleMs?: number;
   oneWayMs?: number;
   syncBefore?: boolean;
+  mergeMs?: number;
+  attachMs?: number;
+  syncTimeoutMs?: number;
+  maxRequestMs?: number;
   /** URL substrings that are never tracked (in addition to the recorder and Vite's own requests). */
   ignore?: string[];
   /** Record the page for screen replay. Default true. */
@@ -32,28 +36,41 @@ function install(win: Window & typeof globalThis): void {
   const recorder = config.recorder.replace(/\/$/, "");
   const originalFetch = win.fetch.bind(win);
   let warned = false;
+  // when the recorder isn't running, stop calling it for a while instead of on every click
+  let downUntil = 0;
+  const RETRY_MS = 10_000;
 
-  const send = async (payload: CheckpointPayload) => {
+  /** POSTs to the recorder as text/plain: a simple request, so no CORS preflight. */
+  const post = async (path: string, body: string, keepalive = false) => {
+    if (Date.now() < downUntil) return;
     try {
-      const res = await originalFetch(`${recorder}/api/checkpoint`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await originalFetch(`${recorder}${path}`, { method: "POST", headers: { "content-type": "text/plain" }, body, keepalive });
+      if (!res.ok) console.warn(`[ashiato] recorder answered HTTP ${res.status} for ${path}: ${await res.text()}`);
     } catch (e) {
+      downUntil = Date.now() + RETRY_MS;
       if (!warned) {
         warned = true;
         console.warn(`[ashiato] recorder not reachable at ${recorder} (${String(e)}). Start it with \`npx ashiato record --db ...\`.`);
       }
     }
   };
+  const send = (payload: CheckpointPayload) => post("/api/checkpoint", JSON.stringify(payload));
 
-  const ignoreList = [recorder, "/@vite/", "/@fs/", "/@id/", "/node_modules/", "/__vite", ...(config.ignore ?? [])];
+  const ignoreList = [recorder, "/@vite/", "/@fs/", "/@id/", "/@ashiato/", "/node_modules/", "/__vite", ...(config.ignore ?? [])];
   const ignore = (url: string) => ignoreList.some((s) => url.includes(s));
 
   const tab = tabId(win);
-  const tracker = new Tracker({ send, tab, settleMs: config.settleMs, oneWayMs: config.oneWayMs, syncBefore: config.syncBefore });
+  const tracker = new Tracker({
+    send,
+    tab,
+    settleMs: config.settleMs,
+    oneWayMs: config.oneWayMs,
+    syncBefore: config.syncBefore,
+    mergeMs: config.mergeMs,
+    attachMs: config.attachMs,
+    syncTimeoutMs: config.syncTimeoutMs,
+    maxRequestMs: config.maxRequestMs,
+  });
   hookFetch(win, tracker, ignore);
   hookXhr(win, tracker, ignore);
   hookUserActions(win.document, tracker);
@@ -62,19 +79,25 @@ function install(win: Window & typeof globalThis): void {
     win.addEventListener("DOMContentLoaded", () => hookWebView(win, tracker, jsonRpc), { once: true });
   }
 
+  // keepalive requests and beacons are limited to 64KB
+  const small = (body: string) => new Blob([body]).size < 60_000;
+  const beacon = (path: string, body: string) =>
+    Date.now() >= downUntil && small(body) && navigator.sendBeacon?.(`${recorder}${path}`, new Blob([body], { type: "text/plain" }));
+
+  // leaving the page (navigation after save, reload): actions only waiting for their settle time
+  // would never get their checkpoint, and their changes would show up as "outside actions" later
+  win.addEventListener("pagehide", () => {
+    for (const payload of tracker.flushSettled()) beacon("/api/checkpoint", JSON.stringify(payload));
+  });
+
   if (config.replay !== false) {
-    const url = `${recorder}/api/replay`;
-    // text/plain keeps these simple requests (no CORS preflight); batches go out one at a time, in order
+    // batches go out one at a time, in order
     let queue = Promise.resolve();
-    const post = (body: string, final: boolean) => {
-      // keepalive requests and beacons are limited to 64KB
-      const small = new Blob([body]).size < 60_000;
-      if (final && small && navigator.sendBeacon?.(url, new Blob([body], { type: "text/plain" }))) return;
-      queue = queue
-        .then(() => originalFetch(url, { method: "POST", headers: { "content-type": "text/plain" }, body, keepalive: small }))
-        .then(() => undefined, () => undefined);
+    const postReplay = (body: string, final: boolean) => {
+      if (final && beacon("/api/replay", body)) return;
+      queue = queue.then(() => post("/api/replay", body, small(body)));
     };
-    startReplay(win, tab, post, typeof config.replay === "object" ? config.replay : {});
+    startReplay(win, tab, postReplay, typeof config.replay === "object" ? config.replay : {});
   }
 }
 
