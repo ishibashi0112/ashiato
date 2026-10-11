@@ -1,6 +1,7 @@
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize } from "node:path";
+import { pipeline } from "node:stream";
 import { countChanges } from "../core/diff.js";
 import type { MediaStore } from "../core/media.js";
 import type { CheckpointOptions } from "../core/recorder.js";
@@ -28,8 +29,13 @@ const MIME: Record<string, string> = {
   ".json": "application/json",
 };
 
-/** Largest request body accepted (a screen recording chunk is far smaller). */
-const MAX_BODY = 64 * 1024 * 1024;
+/**
+ * Largest request bodies accepted. The replay and checkpoint endpoints are open to every origin
+ * (the app runs on its own dev server), so they get limits just above what a page really sends.
+ */
+const MAX_JSON = 1024 * 1024;
+const MAX_REPLAY_BATCH = 32 * 1024 * 1024;
+const MAX_VIDEO_CHUNK = 64 * 1024 * 1024;
 
 class HttpError extends Error {
   constructor(
@@ -82,7 +88,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
 
   if (url.pathname === "/api/checkpoint" && req.method === "POST") {
     if (!o.checkpoint) return sendJson(res, 405, { error: "This session is read-only" });
-    const body = (await readJson(req)) as { label?: unknown; source?: unknown; action?: ActionInfo; dropIfEmpty?: boolean };
+    const body = (await readJson(req, MAX_JSON)) as { label?: unknown; source?: unknown; action?: ActionInfo; dropIfEmpty?: boolean };
     const label = typeof body.label === "string" ? body.label.trim() : "";
     const step = await o.checkpoint(label || "checkpoint", typeof body.source === "string" ? body.source : "http", {
       action: body.action,
@@ -96,19 +102,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
     const media = o.media;
     if (req.method === "POST") {
       if (!media || media.readOnly) return sendJson(res, 405, { error: "This session is read-only" });
-      const body = (await readJson(req)) as { tab?: unknown; events?: unknown };
+      const body = (await readJson(req, MAX_REPLAY_BATCH)) as { tab?: unknown; events?: unknown };
       try {
-        media.appendReplay(String(body.tab), body.events as unknown[]);
+        // tells the page whether to send a full snapshot; nothing recorded
+        return sendJson(res, 200, media.appendReplay(String(body.tab), body.events as unknown[]));
       } catch (e) {
         throw new HttpError(400, (e as Error).message);
       }
-      return void res.writeHead(204).end();
     }
     if (req.method === "GET") {
       // one JSON object per line: { tab, events }. No CORS header: other origins can't read it.
-      const file = media?.replayPath();
-      res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store" });
-      return file ? void createReadStream(file).pipe(res) : void res.end();
+      // The UI asks for the bytes added since its last read with a Range header.
+      const path = media?.replayPath();
+      const file = { path: path ?? "", size: path ? statSync(path).size : 0, mimeType: "application/x-ndjson; charset=utf-8" };
+      return serveRange(req, res, file);
     }
   }
 
@@ -147,15 +154,15 @@ async function handleVideo(
   if (!media || media.readOnly) return sendJson(res, 405, { error: "This session is read-only" });
   try {
     if (id === undefined) {
-      const body = (await readJson(req)) as { mimeType?: string; startedAt?: string };
+      const body = (await readJson(req, MAX_JSON)) as { mimeType?: string; startedAt?: string };
       return sendJson(res, 200, media.startVideo(String(body.mimeType), String(body.startedAt)));
     }
     if (action === "chunk") {
-      media.appendVideo(id, await readBody(req));
+      media.appendVideo(id, await readBody(req, MAX_VIDEO_CHUNK));
       return void res.writeHead(204).end();
     }
     if (action === "stop") {
-      const body = (await readJson(req)) as { endedAt?: string };
+      const body = (await readJson(req, MAX_JSON)) as { endedAt?: string };
       return sendJson(res, 200, media.stopVideo(id, String(body.endedAt)));
     }
   } catch (e) {
@@ -164,13 +171,14 @@ async function handleVideo(
   sendJson(res, 404, { error: "Not found" });
 }
 
-/** Serves a file with HTTP Range support, which the browser's <video> needs to seek. */
+/** Serves a file with HTTP Range support, which the browser's <video> needs to seek. An empty `path` is an empty file. */
 function serveRange(req: IncomingMessage, res: ServerResponse, file: { path: string; size: number; mimeType: string }) {
   const headers = { "Content-Type": file.mimeType, "Accept-Ranges": "bytes", "Cache-Control": "no-store" };
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? "");
-  if (!range || (!range[1] && !range[2]) || file.size === 0) {
+  if (file.size === 0) return void res.writeHead(200, { ...headers, "Content-Length": 0 }).end();
+  if (!range || (!range[1] && !range[2])) {
     res.writeHead(200, { ...headers, "Content-Length": file.size });
-    return void createReadStream(file.path).pipe(res);
+    return stream(file.path, res);
   }
   // "bytes=500-" (from 500), "bytes=500-999", or "bytes=-500" (the last 500)
   let start = range[1] ? Number(range[1]) : file.size - Number(range[2]);
@@ -182,7 +190,12 @@ function serveRange(req: IncomingMessage, res: ServerResponse, file: { path: str
     return void res.end();
   }
   res.writeHead(206, { ...headers, "Content-Length": end - start + 1, "Content-Range": `bytes ${start}-${end}/${file.size}` });
-  createReadStream(file.path, { start, end }).pipe(res);
+  stream(file.path, res, { start, end });
+}
+
+/** Unlike `.pipe()`, closes the file when the browser goes away mid-transfer (a <video> seeking does so all the time). */
+function stream(path: string, res: ServerResponse, range?: { start: number; end: number }) {
+  pipeline(createReadStream(path, range), res, () => undefined);
 }
 
 function serveStatic(res: ServerResponse, root: string, pathname: string) {
@@ -205,20 +218,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+  if (Number(req.headers["content-length"]) > limit) throw new HttpError(413, "Request body too large");
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const c of req) {
     size += (c as Buffer).length;
-    if (size > MAX_BODY) throw new HttpError(413, "Request body too large");
+    if (size > limit) throw new HttpError(413, "Request body too large");
     chunks.push(c as Buffer);
   }
   return Buffer.concat(chunks);
 }
 
 /** Parses a JSON body whatever its content-type (the browser script sends text/plain to skip the CORS preflight). */
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const text = (await readBody(req)).toString("utf8");
+async function readJson(req: IncomingMessage, limit: number): Promise<unknown> {
+  const text = (await readBody(req, limit)).toString("utf8");
   let body: unknown;
   try {
     body = text ? JSON.parse(text) : {};

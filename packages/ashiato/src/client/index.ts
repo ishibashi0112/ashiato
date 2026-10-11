@@ -36,16 +36,25 @@ function install(win: Window & typeof globalThis): void {
   const recorder = config.recorder.replace(/\/$/, "");
   const originalFetch = win.fetch.bind(win);
   let warned = false;
+  /** Errors from the recorder already shown: a page sends every second, so each is shown once. */
+  const rejected = new Set<string>();
   // when the recorder isn't running, stop calling it for a while instead of on every click
   let downUntil = 0;
   const RETRY_MS = 10_000;
 
-  /** POSTs to the recorder as text/plain: a simple request, so no CORS preflight. */
-  const post = async (path: string, body: string, keepalive = false) => {
+  /** POSTs to the recorder as text/plain: a simple request, so no CORS preflight. Resolves to its JSON reply, if any. */
+  const post = async (path: string, body: string, keepalive = false): Promise<unknown> => {
     if (Date.now() < downUntil) return;
     try {
       const res = await originalFetch(`${recorder}${path}`, { method: "POST", headers: { "content-type": "text/plain" }, body, keepalive });
-      if (!res.ok) console.warn(`[ashiato] recorder answered HTTP ${res.status} for ${path}: ${await res.text()}`);
+      if (!res.ok) {
+        // 404 / 405: a read-only `ashiato show`, or another server, on the recorder's port
+        if (res.status === 404 || res.status === 405) downUntil = Date.now() + RETRY_MS;
+        const message = `[ashiato] recorder answered HTTP ${res.status} for ${path}: ${await res.text()}`;
+        if (!rejected.has(message)) console.warn(message);
+        rejected.add(message);
+      }
+      else if (res.headers.get("content-type")?.startsWith("application/json")) return (await res.json().catch(() => undefined)) as unknown;
     } catch (e) {
       downUntil = Date.now() + RETRY_MS;
       if (!warned) {
@@ -54,12 +63,19 @@ function install(win: Window & typeof globalThis): void {
       }
     }
   };
-  const send = (payload: CheckpointPayload) => post("/api/checkpoint", JSON.stringify(payload));
+  const send = async (payload: CheckpointPayload) => void (await post("/api/checkpoint", JSON.stringify(payload)));
 
   const ignoreList = [recorder, "/@vite/", "/@fs/", "/@id/", "/@ashiato/", "/node_modules/", "/__vite", ...(config.ignore ?? [])];
   const ignore = (url: string) => ignoreList.some((s) => url.includes(s));
 
-  const tab = tabId(win);
+  // a same-origin frame of a page that runs this script: rrweb records it as part of that page
+  let nested = false;
+  try {
+    nested = win !== win.top && win.parent.__ashiatoInstalled === true;
+  } catch {
+    // a frame of another origin's page
+  }
+  const tab = tabId(win, nested);
   const tracker = new Tracker({
     send,
     tab,
@@ -90,12 +106,14 @@ function install(win: Window & typeof globalThis): void {
     for (const payload of tracker.flushSettled()) beacon("/api/checkpoint", JSON.stringify(payload));
   });
 
-  if (config.replay !== false) {
+  if (config.replay !== false && !nested) {
     // batches go out one at a time, in order
-    let queue = Promise.resolve();
+    let queue: Promise<unknown> = Promise.resolve();
     const postReplay = (body: string, final: boolean) => {
-      if (final && beacon("/api/replay", body)) return;
-      queue = queue.then(() => post("/api/replay", body, small(body)));
+      if (final && beacon("/api/replay", body)) return Promise.resolve(undefined);
+      const reply = queue.then(() => post("/api/replay", body, small(body)));
+      queue = reply;
+      return reply as Promise<{ snapshot?: boolean } | undefined>;
     };
     startReplay(win, tab, postReplay, typeof config.replay === "object" ? config.replay : {});
   }

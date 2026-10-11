@@ -3,7 +3,7 @@
  * checkpoints that contain exactly the rows each click changed.
  * Needs the built client (`pnpm build`) and a Chromium for playwright-core.
  */
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { connect } from "../src/adapters/index.js";
 import { MediaStore } from "../src/core/media.js";
 import { Recorder } from "../src/core/recorder.js";
 import type { Step } from "../src/core/types.js";
-import { startServer } from "../src/server/server.js";
+import { startServer, type ServerOptions } from "../src/server/server.js";
 import ashiato from "../src/vite/index.js";
 import { createAppDb } from "./helpers.js";
 
@@ -34,6 +34,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
   let vite: ViteDevServer;
   let recorder: Recorder;
   let recorderUrl: string;
+  let serverOptions: ServerOptions;
   const closers: (() => Promise<unknown>)[] = [];
   const app = createAppDb();
 
@@ -42,7 +43,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     recorder = new Recorder(adapter);
     const session = await recorder.start();
     const media = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), session);
-    const rec = await startServer({
+    serverOptions = {
       port: 0,
       uiDir,
       getSession: () => session,
@@ -52,7 +53,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
         return () => recorder.off("step", listener);
       },
       media,
-    });
+    };
+    const rec = await startServer(serverOptions);
     recorderUrl = `http://127.0.0.1:${(rec.address() as AddressInfo).port}`;
     closers.push(() => adapter.close(), () => new Promise((r) => rec.close(r)));
 
@@ -239,4 +241,59 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     expect(errors).toEqual([]);
     await ui.close();
   });
+
+  const tabOf = (p: Page | import("playwright-core").Frame) => p.evaluate(() => (JSON.parse(sessionStorage.getItem("__ashiato_tab")!) as { id: string }).id);
+
+  it("gives a popup its own tab, keeps a tab's id across reloads, and records frames as part of their page", async () => {
+    const tab = await tabOf(page);
+    const [popup] = await Promise.all([page.waitForEvent("popup"), page.evaluate(() => void window.open(location.href))]);
+    await popup.waitForFunction(() => window.__ashiatoInstalled === true);
+    expect(await tabOf(popup)).not.toBe(tab);
+    await popup.close();
+
+    await page.evaluate(() => {
+      const frame = Object.assign(document.createElement("iframe"), { src: `${location.href}?frame` });
+      document.body.append(frame);
+    });
+    const framed = () => page.frames().find((f) => f.url().includes("?frame"));
+    await expect.poll(() => Boolean(framed())).toBe(true);
+    const frame = framed()!;
+    await frame.waitForFunction(() => window.__ashiatoInstalled === true);
+    expect(await tabOf(frame)).toBe(tab);
+    await page.waitForTimeout(1500);
+    // the frame's own replay would start with a meta event carrying its URL
+    const metas = (await replayEvents()).flatMap((b) => b.events).filter((e) => e.type === 4);
+    expect(metas.map((e) => (e.data as { href?: string }).href).filter((href) => href?.includes("?frame"))).toEqual([]);
+    await page.evaluate(() => document.querySelector("iframe")?.remove());
+
+    await page.reload();
+    await page.waitForFunction(() => window.__ashiatoInstalled === true);
+    expect(await tabOf(page)).toBe(tab);
+  }, 30_000);
+
+  it("asks a page that was already open for a full snapshot when the recorder restarts", async () => {
+    const tab = await tabOf(page);
+    // the page's own snapshot, taken when it loaded, went to the recorder before the restart
+    const sent = async () => (await replayEvents()).filter((b) => b.tab === tab).flatMap((b) => b.events).some((e) => e.type === 2);
+    await expect.poll(sent, { timeout: 5000 }).toBe(true);
+    const before = serverOptions.media!;
+    const restarted = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), recorder.session);
+    serverOptions.media = restarted;
+    try {
+      // any change to the page sends a batch, and the reply asks for a snapshot
+      await page.getByRole("button", { name: "詳細タブ" }).click();
+      const snapshots = () => {
+        const file = restarted.replayPath();
+        if (!file) return 0;
+        const batches = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { tab: string; events: { type: number }[] });
+        return batches.filter((b) => b.tab === tab).flatMap((b) => b.events).filter((e) => e.type === 2).length;
+      };
+      await expect.poll(snapshots, { timeout: 10_000 }).toBe(1);
+      // one is enough: the batches already on their way when it was taken get the same answer
+      await page.waitForTimeout(2500);
+      expect(snapshots()).toBe(1);
+    } finally {
+      serverOptions.media = before;
+    }
+  }, 30_000);
 });

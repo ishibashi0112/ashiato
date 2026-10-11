@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { loadReplay, useScreenRecorder, type ReplayTabs } from "./Screen";
+import { emptyReplay, loadReplay, useScreenRecorder, type ReplayState, type ReplayTabs } from "./Screen";
 import { StepDetail } from "./StepDetail";
 import type { Session, Step, VideoInfo } from "./types";
 
@@ -31,19 +31,25 @@ export function App() {
   const [hideEmpty, setHideEmpty] = useState(false);
   const [replay, setReplay] = useState<ReplayTabs>(new Map());
   const [replayVersion, setReplayVersion] = useState(0);
+  const replayState = useRef<ReplayState>(emptyReplay());
+  const replayReads = useRef<Promise<void>>(Promise.resolve());
   const screen = useScreenRecorder((video: VideoInfo) =>
     setSession((prev) => prev && { ...prev, videos: [...(prev.videos ?? []).filter((v) => v.id !== video.id), video] }),
   );
 
+  const sessionId = session?.id;
   useEffect(() => {
-    let cancelled = false;
-    loadReplay()
-      .then((tabs) => !cancelled && setReplay(tabs))
+    if (!sessionId) return;
+    // one read at a time, each fetching only what was added since the previous one
+    replayReads.current = replayReads.current
+      .then(() => loadReplay(replayState.current, sessionId))
+      .then((next) => {
+        if (next === replayState.current) return;
+        replayState.current = next;
+        setReplay(next.tabs);
+      })
       .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [replayVersion]);
+  }, [replayVersion, sessionId]);
 
   useEffect(() => {
     let es: EventSource | undefined;
