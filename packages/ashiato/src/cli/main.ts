@@ -39,6 +39,10 @@ While recording, press Enter to take a checkpoint (type a label first if you lik
 
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
 
+/** East Asian wide characters (CJK, kana, hangul, fullwidth forms) take two terminal columns. */
+const WIDE = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]/u;
+const padColumns = (s: string, width: number) => s + " ".repeat(Math.max(0, width - [...s].reduce((n, c) => n + (WIDE.test(c) ? 2 : 1), 0)));
+
 function uiDir(): string | undefined {
   const here = dirname(fileURLToPath(import.meta.url));
   for (const dir of [join(here, "ui"), join(here, "../ui"), join(here, "../../dist/ui")]) {
@@ -86,7 +90,7 @@ export async function main(argv: string[]): Promise<void> {
     for (const t of await db.listTables()) {
       const key = await db.primaryKey(t);
       const rows = await db.countRows(t);
-      console.log(`${tableId(t).padEnd(40)} ${String(rows).padStart(10)} rows  key: ${key.length ? key.join(", ") : "(none)"}`);
+      console.log(`${padColumns(tableId(t), 40)} ${String(rows).padStart(10)} rows  key: ${key.length ? key.join(", ") : "(none)"}`);
     }
     await db.close();
     return;

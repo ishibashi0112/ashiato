@@ -68,17 +68,26 @@ describe("Tracker", () => {
 
   it("checkpoints requests without a user action, dropping them when nothing changed", async () => {
     const t = make();
-    const a = t.beginRequest({ kind: "http", method: "GET", url: "/api/orders" });
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/api/visits" });
     a.end({ status: 200 });
     await flush(200);
-    expect(sent.at(-1)).toMatchObject({ label: "GET /api/orders", dropIfEmpty: true, action: { type: "request" } });
+    expect(sent.at(-1)).toMatchObject({ label: "POST /api/visits", dropIfEmpty: true, action: { type: "request" } });
+  });
+
+  it("takes no checkpoint for requests without a user action that only read (polling, page loads)", async () => {
+    const t = make();
+    const a = t.beginRequest({ kind: "http", method: "GET", url: "/api/notifications" });
+    expect(a.waiting).toBe(false);
+    a.end({ status: 200 });
+    await flush(200);
+    expect(sent).toEqual([]);
   });
 
   it("does not attach a late request to an old click that had no requests", async () => {
     const t = make();
     t.userAction("click", 'tab "Details"');
     await flush(5000);
-    const a = t.beginRequest({ kind: "http", method: "GET", url: "/poll" });
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/heartbeat" });
     a.end();
     await flush(200);
     expect(sent.at(-1)?.action?.type).toBe("request");
@@ -97,7 +106,7 @@ describe("Tracker", () => {
 
   it("does not block requests when the recorder hangs", async () => {
     const t = new Tracker({ send: () => new Promise(() => {}), syncTimeoutMs: 1000 });
-    const a = t.beginRequest({ kind: "http", method: "GET", url: "/x" });
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/x" });
     let ready = false;
     void a.ready.then(() => (ready = true));
     await flush(999);
@@ -108,7 +117,7 @@ describe("Tracker", () => {
 
   it("keeps defaults for options passed as undefined", async () => {
     const t = make({ syncBefore: undefined, settleMs: undefined });
-    const a = t.beginRequest({ kind: "http", method: "GET", url: "/x" });
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/x" });
     await a.ready;
     expect(sent).toHaveLength(1);
     a.end();
@@ -156,7 +165,7 @@ describe("Tracker", () => {
     expect(bReady).toBe(true);
   });
 
-  it("keeps a later action's requests behind an earlier action's pending sync", async () => {
+  it("keeps a later action's requests behind an earlier action's pending sync, as far apart as they began", async () => {
     let release!: () => void;
     const t = new Tracker({ page: () => "/", send: () => new Promise<void>((r) => (release = r)) });
     const order: string[] = [];
@@ -169,7 +178,11 @@ describe("Tracker", () => {
     expect(order).toEqual([]);
     release();
     await flush(0);
-    expect(order).toEqual(["a", "b"]);
+    expect(order).toEqual(["a"]);
+    await flush(399);
+    expect(order).toEqual(["a"]);
+    await flush(1);
+    expect(order).toEqual(["a", "b"]); // a is still running: the two overlap, as they would without ashiato
   });
 
   it("keeps two quick clicks apart once the first one has sent its requests", async () => {
@@ -200,8 +213,8 @@ describe("Tracker", () => {
     t.userAction("click", 'button "Delete"');
     const b = t.beginRequest({ kind: "http", method: "POST", url: "/del" });
     await b.ready;
-    // Save's checkpoint went out first, then Delete got its own sync instead of skipping it
-    expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "Save"', "outside actions"]);
+    // Save's checkpoint went out first, and Delete waited for it: taken as Delete began, it stands in for Delete's sync
+    expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "Save"']);
   });
 
   it("labels a field change followed by a click on Save by the click", async () => {
@@ -237,7 +250,7 @@ describe("Tracker", () => {
 
   it("doesn't let a long-polling request switch off other actions' sync checkpoints", async () => {
     const t = make();
-    const poll = t.beginRequest({ kind: "http", method: "GET", url: "/poll" });
+    const poll = t.beginRequest({ kind: "http", method: "POST", url: "/subscribe" }); // long-polling
     await poll.ready;
     await flush(6000);
     t.userAction("click", 'button "Save"');
@@ -276,6 +289,22 @@ describe("Tracker", () => {
     expect(sent.map((p) => p.label)).toEqual(["outside actions"]); // not sent twice
   });
 
+  it("hands over a click's checkpoint, not a search's, when the page goes away right after saving", async () => {
+    const t = make();
+    t.userAction("click", 'button "Search"');
+    const search = t.beginRequest({ kind: "http", method: "GET", url: "/api/search" });
+    await search.ready;
+    await flush(400);
+    t.userAction("click", 'button "Save and close"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    await save.ready;
+    search.end({ status: 200 });
+    save.end({ status: 200 }); // then the app navigates away
+    const out = t.flushSettled();
+    expect(out).toMatchObject([{ label: 'click button "Save and close"', dropIfEmpty: false }]);
+    expect(out[0]?.action?.requests.map((r) => r.url)).toEqual(["/api/search", "/api/save"]);
+  });
+
   it("lets an action settle although a fast poller keeps sending requests", async () => {
     const t = make();
     // a progress poll every 100ms, answered in 20ms: never quiet for settleMs
@@ -293,13 +322,82 @@ describe("Tracker", () => {
       await flush(30_000 + 300);
       const cp = sent.find((p) => p.label === 'click button "Save"');
       expect(cp?.action?.requests.filter((r) => r.method === "POST")).toHaveLength(1);
-      // the poller carries on in actions of its own, dropped when nothing changed
+      // the poller carries on in actions of its own, which only read: no checkpoints
       const count = sent.length;
       await flush(30_000 + 300);
-      expect(sent.slice(count)).toMatchObject([{ action: { type: "request" }, dropIfEmpty: true }]);
+      expect(sent.slice(count)).toEqual([]);
     } finally {
       clearInterval(poll);
     }
+  });
+
+  it("keeps a click's changes out of a request that was running when it started", async () => {
+    const t = make();
+    // a page-load request that writes, still running
+    const visit = t.beginRequest({ kind: "http", method: "POST", url: "/api/visits" }, undefined);
+    await visit.ready;
+    await flush(6000); // open for long: it doesn't hold back the click's sync
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    expect(save.waiting).toBe(true);
+    await save.ready;
+    visit.end({ status: 200 });
+    await flush(150); // the visit settles while Save's POST runs: its checkpoint would take Save's changes
+    expect(sent.map((p) => p.label)).toEqual(["outside actions", "outside actions"]);
+    save.end({ status: 200 });
+    await flush(150);
+    expect(sent.slice(2)).toMatchObject([{ label: 'click button "Save"', dropIfEmpty: false }]);
+    expect(sent[2]?.action?.requests.map((r) => r.url)).toEqual(["/api/visits", "/api/save"]);
+  });
+
+  it("puts actions whose writes overlap into one step, named after the first click", async () => {
+    const t = make();
+    t.userAction("click", 'button "Order"');
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/api/orders" });
+    await a.ready;
+    await flush(100);
+    t.userAction("click", 'button "Order"'); // double click: the second POST starts before the first one ends
+    const b = t.beginRequest({ kind: "http", method: "POST", url: "/api/orders" });
+    expect(b.waiting).toBe(false);
+    a.end({ status: 200 });
+    await flush(200); // the first click settles while the second one's POST is still running
+    expect(sent.filter((p) => p.source !== "sync")).toEqual([]);
+    b.end({ status: 500 });
+    await flush(150);
+    const steps = sent.filter((p) => p.source !== "sync");
+    expect(steps).toMatchObject([{ label: 'click button "Order"', source: "POST /api/orders" }]);
+    expect(steps[0]?.action?.requests.map((r) => r.status)).toEqual([200, 500]);
+  });
+
+  it("doesn't hold other actions' checkpoints behind a long-running call", async () => {
+    const t = make();
+    t.userAction("click", 'button "Pick file"');
+    t.beginRequest({ kind: "rpc", method: "host.openFileDialog" }); // the host waits for the user
+    await flush(6000);
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    await save.ready;
+    save.end({ status: 200 });
+    await flush(150);
+    expect(sent.map((p) => p.label)).toEqual(["outside actions", "outside actions", 'click button "Save"']);
+  });
+
+  it("takes an action's checkpoint before the next one's sync once its writes are done", async () => {
+    const t = make();
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    await save.ready;
+    save.end({ status: 200 });
+    const reload = t.beginRequest({ kind: "http", method: "GET", url: "/api/list" }); // still running
+    await flush(400);
+    t.userAction("click", 'button "Delete"');
+    const del = t.beginRequest({ kind: "http", method: "POST", url: "/api/delete" });
+    await del.ready;
+    expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "Save"']);
+    reload.end({ status: 200 });
+    del.end({ status: 200 });
+    await flush(150);
+    expect(sent.map((p) => p.label).slice(2)).toEqual(['click button "Delete"']);
   });
 
   it("keeps a request with its click even when a confirm() was open longer than maxRequestMs", async () => {
@@ -348,6 +446,156 @@ describe("Tracker", () => {
     expect(c.waiting).toBe(true);
     await c.ready;
     expect(sent.map((p) => p.label).at(-1)).toBe("outside actions");
+  });
+
+  describe("with a recorder slower than the user", () => {
+    // every checkpoint takes 1s (a large SQL Server database)
+    const slow = (opts: Partial<ConstructorParameters<typeof Tracker>[0]> = {}) => {
+      sent = [];
+      return new Tracker({
+        page: () => "/",
+        send: async (p) => {
+          await new Promise((r) => setTimeout(r, 1000));
+          sent.push(p);
+        },
+        ...opts,
+      });
+    };
+    const steps = () => sent.filter((p) => p.source !== "sync").map((p) => p.label);
+
+    it("keeps a click apart from the previous one that only seemed to overlap it because it waited for its sync", async () => {
+      const t = slow();
+      t.userAction("click", 'button "Register"');
+      const a = t.beginRequest({ kind: "http", method: "POST", url: "/api/customers" });
+      await flush(1000); // its sync
+      await flush(100);
+      t.userAction("click", 'button "Order"'); // 1.1s after the first click: in the app, Register was done long ago
+      const b = t.beginRequest({ kind: "http", method: "POST", url: "/api/orders" });
+      await flush(50);
+      a.end({ status: 201 });
+      await flush(0);
+      expect(b.waiting).toBe(true);
+      let ready = false;
+      void b.ready.then(() => (ready = true));
+      await flush(999);
+      expect(ready).toBe(false); // Register's checkpoint is taken first; it also serves as Order's sync
+      await flush(1);
+      expect(ready).toBe(true);
+      expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "Register"']);
+      b.end({ status: 201 });
+      await flush(150 + 1000);
+      expect(steps()).toEqual(['click button "Register"', 'click button "Order"']);
+    });
+
+    it("still puts two clicks in one step when their requests overlap with the same delay", async () => {
+      const t = slow();
+      t.userAction("click", 'button "Order"');
+      const a = t.beginRequest({ kind: "http", method: "POST", url: "/api/orders" }); // takes 2s
+      await flush(1100);
+      t.userAction("click", 'button "Order"');
+      const b = t.beginRequest({ kind: "http", method: "POST", url: "/api/orders" });
+      let ready = false;
+      void b.ready.then(() => (ready = true));
+      await flush(999);
+      expect(ready).toBe(false);
+      await flush(1);
+      expect(ready).toBe(true); // as long as a waited; a is still running then
+      await flush(900);
+      a.end({ status: 201 });
+      await flush(100);
+      b.end({ status: 201 });
+      await flush(150 + 1000);
+      expect(steps()).toEqual(['click button "Order"']);
+      expect(sent.at(-1)?.action?.requests).toHaveLength(2);
+    });
+
+    it("keeps a click's changes out of an action that only read and settles while the click waits for its sync", async () => {
+      const t = slow();
+      t.userAction("change", 'input "note"');
+      const poll = t.beginRequest({ kind: "http", method: "GET", url: "/api/notifications" }); // waits for its sync
+      t.userAction("click", 'button "Save"');
+      const save = t.beginRequest({ kind: "http", method: "PUT", url: "/api/orders/1" }); // its sync is next in line
+      await flush(1000);
+      poll.end({ status: 200 });
+      await flush(150); // the change settles; a checkpoint queued now would be taken after the PUT
+      await flush(850);
+      await save.ready;
+      save.end({ status: 200 });
+      await flush(150 + 1000);
+      expect(steps()).toEqual(['click button "Save"']);
+      expect(sent.at(-1)?.action?.requests.map((r) => r.method)).toEqual(["GET", "PUT"]);
+    });
+
+    it("drops a sync it couldn't wait for, instead of taking it after the action's changes", async () => {
+      // an action's checkpoint takes 3s, a sync 1s
+      const t = slow({
+        syncTimeoutMs: 1500,
+        send: async (p) => {
+          await new Promise((r) => setTimeout(r, p.source === "sync" ? 1000 : 3000));
+          sent.push(p);
+        },
+      });
+      t.userAction("click", 'button "A"');
+      const a = t.beginRequest({ kind: "http", method: "POST", url: "/a" });
+      await flush(1000);
+      a.end();
+      await flush(150); // A's checkpoint: being taken until 4150
+      await flush(100);
+      t.userAction("click", 'button "B"'); // gets a sync of its own, queued behind A's checkpoint
+      const b = t.beginRequest({ kind: "http", method: "POST", url: "/b" });
+      await flush(1500); // B's request goes out without it at 2750
+      b.end();
+      await flush(150 + 5000);
+      expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "A"', 'click button "B"']);
+    });
+  });
+
+  it("still takes a step's checkpoint when writes keep overlapping each other (a heartbeat message)", async () => {
+    const t = make();
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    await save.ready;
+    save.end({ status: 200 });
+    // a one-way message every 400ms, each one open for oneWayMs (500ms)
+    const beat = setInterval(() => {
+      const h = t.beginRequest({ kind: "rpc", method: "heartbeat" });
+      setTimeout(() => h.end(), 500);
+    }, 400);
+    try {
+      await flush(70_000);
+      expect(sent.find((p) => p.label === 'click button "Save"')).toBeTruthy();
+    } finally {
+      clearInterval(beat);
+    }
+  });
+
+  it("takes the checkpoint of a click done writing before the next click's requests, also without syncs", async () => {
+    const t = make({ syncBefore: false });
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    save.end({ status: 200 });
+    t.beginRequest({ kind: "http", method: "GET", url: "/api/events" }); // stays open
+    await flush(400);
+    t.userAction("click", 'button "Delete"');
+    const del = t.beginRequest({ kind: "http", method: "POST", url: "/api/delete" });
+    del.end({ status: 200 });
+    await flush(150);
+    expect(sent.map((p) => p.label)).toEqual(['click button "Save"', 'click button "Delete"']);
+  });
+
+  it("names the step after the later click when it overlaps a call that ran for long", async () => {
+    const t = make();
+    t.userAction("click", 'button "Generate"');
+    const gen = t.beginRequest({ kind: "rpc", method: "host.generate" });
+    await flush(6000);
+    t.userAction("click", 'button "Save"');
+    const save = t.beginRequest({ kind: "http", method: "POST", url: "/api/save" });
+    await save.ready;
+    gen.end(); // while Save's POST runs: the two can't be told apart
+    await flush(150);
+    save.end({ status: 200 });
+    await flush(150);
+    expect(sent.filter((p) => p.source !== "sync")).toMatchObject([{ label: 'click button "Save"' }]);
   });
 
   it("tells the caller once a request has ended, also when the time cap ends it", async () => {
