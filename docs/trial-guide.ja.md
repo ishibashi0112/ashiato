@@ -61,6 +61,8 @@
   GRANT SELECT ON APP_OWNER.STOCK TO ashiato_ro;
   ```
 
+  記録中にアプリが作るテーブル(作業用テーブルなど)も見たい場合、テーブルごとの `GRANT` では足りません(あとから作られたテーブルには権限が付かないため)。SQL Server は上の `db_datareader`(または `GRANT SELECT ON SCHEMA::dbo TO ashiato_ro;`)を、Oracle は `GRANT READ ANY TABLE ON SCHEMA APP_OWNER TO ashiato_ro;`(23ai 以降)か `GRANT READ ANY TABLE TO ashiato_ro;`(12.1.0.2 以降。全スキーマのテーブルが読める権限です)を依頼します。
+
   ashiato が使うのは `SELECT` だけです。トリガーの作成、CDC、DB の設定変更は不要で、依頼する必要もありません。
 
 - [ ] **接続情報**を控えておきます
@@ -201,7 +203,7 @@ npx ashiato record --tables "dbo.Orders,dbo.OrderDetails,dbo.Stock" --ignore-col
 - **カンマ区切りの値は必ず `"` で囲んでください。** PowerShell で囲まずに書くと、`npx` を通したときにカンマが空白に変わり、正しく渡りません
 - テーブル名は `npx ashiato tables` の表示どおりに書きます(`Orders` のように名前だけでも構いません。大文字と小文字は区別しません)
 - `--ignore-columns` は、監視するすべてのテーブルに共通の列名です
-- 監視するテーブルは、記録を始めたときに決まります。記録を始めたあとに作られたテーブル(アプリが実行中に作る作業用テーブルなど)は監視されません
+- 記録中に作られたテーブル(アプリが実行中に作る作業用テーブルなど)も、作られたあとの最初のチェックポイントから監視します。そのステップには **New** と出て、中の行が追加として表示されます。削除されたテーブルは **Gone** と一度だけ出ます。ただし `--tables` に書く名前は記録を始めるときに存在している必要があるので、作業用テーブルも見たいときは `--tables` を付けずに記録します。また、参照専用ユーザーがそのテーブルを読める必要があります([1. 事前に確認しておくこと](#1-事前に確認しておくこと)の DB)
 
 起動すると、次のように表示されます。
 
@@ -352,6 +354,7 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 | 13 | 操作外の変更を分けられる(5 章) | ほかの人やバッチの変更が `outside actions` として出る |
 | 14 | 長時間の記録 | 30 分以上・数十ステップ記録しても遅くならない。タスク マネージャーで Node.js のメモリが増え続けない |
 | 15 | アプリへの影響 | 記録中もアプリの操作感が変わらない(注 2) |
+| 16 | 記録中に作られたテーブル | アプリが作業用テーブルを作る操作で、そのテーブルが **New** として出る(該当する操作があれば) |
 
 - 注 1:SQL Server の日時は、末尾に `Z` の付いた形(例:`2026-10-11T10:00:00.000Z`)で表示されますが、数字は DB に入っている値そのままです。`datetimeoffset` 型だけは、UTC に直した時刻で表示されます。`date` 型は `2026-10-11T00:00:00.000Z`、`time` 型は `1970-01-01T10:00:00.000Z` のように表示されます。Oracle の `DATE` / `TIMESTAMP` は、DB の値をそのまま文字にしたもの(例:`2026-10-11 10:00:00`)です
 - 注 2:5 章の自動記録では、操作の最初の通信を送る直前に一度チェックポイントを取るため、その分だけ通信が待たされます(最大 5 秒)。遅く感じたら、ステップの所要時間と合わせて報告してください
@@ -380,6 +383,7 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 | `NJS-533`(Oracle。`Native Network Encryption ... only supported in node-oracledb thick mode`) | DB 側でネットワーク暗号化(またはチェックサム)が必須になっていて、Thin モードでは接続できません。報告してください |
 | `NJS-518`(Oracle。`Service ... is not registered with the listener`) | サービス名が違います。tnsnames.ora の `SERVICE_NAME` を使います |
 | `Tables not found: ...`(または `--tables` なしで `Watching 0 table(s)`) | `--tables` のテーブル名が違うか、そのテーブルの SELECT 権限がないか、Oracle で `?schema=` を付けていません。`npx ashiato tables` の表示どおりに書き、全体を `"` で囲みます |
+| 記録中にアプリが作ったテーブルが出てこない | 参照専用ユーザーにそのテーブルを読む権限がありません(テーブルごとの `GRANT` では付きません。[1 章](#1-事前に確認しておくこと)の DB を参照)。`--tables` を付けている場合は、その名前のテーブルしか監視しません |
 | `npx ashiato tables` が途中でエラーになって止まる | 読めないテーブルが 1 つあると、一覧はそこで止まります。エラーの全文を報告し、`record` は `--tables` で読めるテーブルを指定して進めてください |
 | `Port 4100 is already in use` | 別の ashiato(またはほかのソフト)が使っています。`--port 4101` などに変えます。5 章ではプラグインにも `recorder` を指定します |
 | `skipped ... rows > --max-rows` | 10 万行を超えるテーブルです。必要なら `--max-rows 300000` のように上げます(行はメモリに持つので、様子を見ながら) |
