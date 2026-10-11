@@ -1,5 +1,5 @@
 export { connect } from "./adapters/index.js";
-export type { BucketedRow, BucketSum, DbAdapter } from "./adapters/types.js";
+export type { BucketedRow, BucketSum, DbAdapter, ListedTable } from "./adapters/types.js";
 export { countChanges, diffSnapshots, tableId, type DiffOptions } from "./core/diff.js";
 export { formatStep } from "./core/format.js";
 export { MediaStore } from "./core/media.js";

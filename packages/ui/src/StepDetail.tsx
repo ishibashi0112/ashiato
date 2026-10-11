@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { ScreenPanel, type ReplayTabs } from "./Screen";
-import type { ActionInfo, JsonValue, Row, Step, TableDiff, VideoInfo } from "./types";
+import type { ActionInfo, JsonValue, Row, Step, TableDiff, TableRef, VideoInfo } from "./types";
 
-const tableName = (t: { table: TableDiff["table"] }) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
+export const tableId = (t: TableRef) => (t.schema ? `${t.schema}.${t.name}` : t.name);
+const tableName = (t: { table: TableRef }) => tableId(t.table);
 const show = (v: JsonValue | undefined) => (v === null || v === undefined ? <i className="null">NULL</i> : String(v));
 
 function columnsOf(rows: Row[]): string[] {
@@ -24,6 +25,23 @@ export function StepDetail({ step, replay, videos }: { step: Step; replay: Repla
       {step.action && <ActionCard action={step.action} />}
       {step.source === "sync" && (
         <p className="hint">These rows changed while no action was running (another user, a batch job, or the app itself).</p>
+      )}
+      {(step.addedTables || step.removedTables) && (
+        <div className="card tables">
+          <h3>Tables</h3>
+          <ul>
+            {step.addedTables?.map((t) => (
+              <li key={`+${tableId(t)}`}>
+                <b className="ins">New</b> <b>{tableId(t)}</b> is watched from this step on; its rows are shown as inserted.
+              </li>
+            ))}
+            {step.removedTables?.map((t) => (
+              <li key={`-${tableId(t)}`}>
+                <b className="del">Gone</b> <b>{tableId(t)}</b> was dropped, renamed, or can no longer be read, so it is no longer watched.
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {step.skipped && step.skipped.length > 0 && (
         <div className="card skipped">

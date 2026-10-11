@@ -19,7 +19,9 @@ export function formatStep(step: Step, maxRowsPerKind = 5, showSkipped = true): 
   const c = countChanges(step.diff);
   const via = step.source && !["manual", "http", "ui"].includes(step.source) && step.source !== step.label ? `  ${dim(step.source)}` : "";
   const lines = [`#${step.id} ${step.label}${via}  ${dim(`(+${c.inserted} ~${c.updated} -${c.deleted}, ${step.durationMs}ms)`)}`];
-  if (step.diff.tables.length === 0) lines.push(dim("  no changes"));
+  if (step.diff.tables.length === 0 && !step.addedTables && !step.removedTables) lines.push(dim("  no changes"));
+  for (const t of step.addedTables ?? []) lines.push(green(`  + new table ${tableId(t)} (watched from now on)`));
+  for (const t of step.removedTables ?? []) lines.push(red(`  - table ${tableId(t)} is gone (dropped, renamed, or no longer readable): no longer watched`));
   if (showSkipped) for (const s of step.skipped ?? []) lines.push(yellow(`  ! ${tableId(s.table)} not compared: ${s.reason}`));
   for (const t of step.diff.tables) {
     lines.push(`  ${tableId(t.table)}`);

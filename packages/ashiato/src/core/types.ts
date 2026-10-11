@@ -99,6 +99,10 @@ export interface Step {
   source?: string;
   action?: ActionInfo;
   diff: Diff;
+  /** Tables that appeared since the previous step (created, renamed, or newly readable). Watched from this step on; their rows are in `diff` as inserted. */
+  addedTables?: TableRef[];
+  /** Watched tables that are gone (dropped, renamed, or no longer readable). No longer watched; their rows are not in `diff`. */
+  removedTables?: TableRef[];
   /** Watched tables this step could not compare (too large, or unreadable). Their changes are not in `diff`. */
   skipped?: SkippedTable[];
   durationMs: number;
@@ -118,6 +122,7 @@ export interface Session {
   id: string;
   startedAt: string;
   dialect: string;
+  /** Tables watched as of the latest step (tables created while recording are added). */
   tables: TableRef[];
   steps: Step[];
   /** Screen replay (rrweb DOM events, one JSON batch per line), next to the session file. */

@@ -9,15 +9,19 @@ export function tableId(t: TableRef): string {
   return t.schema ? `${t.schema}.${t.name}` : t.name;
 }
 
-/** Compares two snapshots of the same tables and returns what was inserted, updated and deleted. */
+/**
+ * Compares two snapshots and returns what was inserted, updated and deleted. A table only in the
+ * newer snapshot is new: its rows count as inserted. A table only in the older one is left out (it
+ * may have been dropped, but also just made unreadable: its rows weren't necessarily deleted).
+ */
 export function diffSnapshots(before: Snapshot, after: Snapshot, options: DiffOptions = {}): Diff {
   const ignore = new Set((options.ignoreColumns ?? []).map((c) => c.toLowerCase()));
   const beforeById = new Map(before.tables.map((t) => [tableId(t.table), t]));
   const tables: TableDiff[] = [];
 
   for (const a of after.tables) {
-    const b = beforeById.get(tableId(a.table));
-    if (!b || a.skipped || b.skipped) continue;
+    const b = beforeById.get(tableId(a.table)) ?? { table: a.table, key: a.key, rows: [], rowCount: 0 };
+    if (a.skipped || b.skipped) continue;
     const [bs, as] = changedParts(b, a);
     const d = as.key.length > 0 && uniqueKeys(bs) && uniqueKeys(as) ? diffByKey(bs, as, ignore) : diffAsMultiset(bs, as, ignore);
     if (d.inserted.length || d.deleted.length || d.updated.length) tables.push(d);
@@ -77,10 +81,11 @@ function diffByKey(before: TableSnapshot, after: TableSnapshot, ignore: Set<stri
 
 /** Tables without a primary key: rows are compared as whole values, so an update shows up as delete + insert. */
 function diffAsMultiset(before: TableSnapshot, after: TableSnapshot, ignore: Set<string>): TableDiff {
+  // NULLs are left out, as a column added or dropped in between (see changedColumns)
   const fingerprint = (r: Row) =>
     JSON.stringify(
       Object.keys(r)
-        .filter((c) => !ignore.has(c.toLowerCase()))
+        .filter((c) => !ignore.has(c.toLowerCase()) && r[c] !== null)
         .sort()
         .map((c) => [c, r[c]]),
     );
@@ -106,7 +111,8 @@ function changedColumns(before: Row, after: Row, ignore: Set<string>): string[] 
   const changed: string[] = [];
   for (const c of cols) {
     if (ignore.has(c.toLowerCase())) continue;
-    if (before[c] !== after[c]) changed.push(c);
+    // a column added or dropped in between (ALTER TABLE) is NULL where it doesn't exist
+    if ((before[c] ?? null) !== (after[c] ?? null)) changed.push(c);
   }
   return changed;
 }
