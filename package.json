@@ -1,0 +1,14 @@
+{
+  "name": "ashiato-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "pnpm --filter @ashiato/ui build && pnpm --filter ashiato build",
+    "test": "pnpm --filter ashiato test",
+    "typecheck": "pnpm -r typecheck"
+  }
+}
