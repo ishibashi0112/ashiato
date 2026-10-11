@@ -1,5 +1,6 @@
 import { normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
+import { ALIAS, BUCKET, SIG, bucketList, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -32,6 +33,33 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     return (await req.query(sql)).recordset as Record<string, unknown>[];
   };
 
+  // Signature: the table's rowversion column when it has one (a new, larger value on every insert
+  // and update), otherwise a hash of the row as JSON (SQL Server 2016 or later). Buckets: CHECKSUM of the key.
+  const rowversions = new Map<string, Promise<string | undefined>>();
+  const rowversionOf = (t: TableRef) => {
+    let rv = rowversions.get(name(t));
+    if (!rv) {
+      rv = query("SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@t) AND system_type_id = 189", { t: name(t) }).then((r) =>
+        r[0] ? String(r[0].name) : undefined,
+      );
+      rv.catch(() => rowversions.delete(name(t)));
+      rowversions.set(name(t), rv);
+    }
+    return rv;
+  };
+  /** FROM clause and signature expression. The hash goes through CROSS APPLY: SUM can't take a subquery. */
+  const signed = async (t: TableRef) => {
+    const rv = await rowversionOf(t);
+    if (rv) return { from: `${name(t)} AS ${ALIAS}`, sig: `CAST(${ALIAS}.${q(rv)} AS BIGINT)` };
+    const json = `(SELECT ${ALIAS}.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES)`;
+    return {
+      from: `${name(t)} AS ${ALIAS} CROSS APPLY (SELECT CAST(SUBSTRING(HASHBYTES('SHA2_256', ${json}), 1, 8) AS BIGINT) AS sig) AS ashiato_h`,
+      sig: "ashiato_h.sig",
+    };
+  };
+  const bucketOf = (key: string[], n: number) =>
+    key.length === 0 || n <= 1 ? "0" : `((CHECKSUM(${key.map((c) => `${ALIAS}.${q(c)}`).join(", ")}) % ${n}) + ${n}) % ${n}`;
+
   return {
     dialect: "mssql",
     async listTables() {
@@ -58,6 +86,21 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     },
     async readRows(t): Promise<Row[]> {
       return (await query(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
+    },
+    async bucketSums(t, key, n) {
+      const b = bucketOf(key, n);
+      const { from, sig } = await signed(t);
+      return toSums(
+        await query(`SELECT ${b} AS b, COUNT_BIG(*) AS n, CAST(SUM(CAST(${sig} AS DECIMAL(38, 0))) AS VARCHAR(40)) AS s FROM ${from} GROUP BY ${b}`),
+      );
+    },
+    async readBuckets(t, key, n, which) {
+      const b = bucketOf(key, n);
+      const { from, sig } = await signed(t);
+      const where = which ? ` WHERE ${b} IN (${bucketList(which)})` : "";
+      return (await query(`SELECT ${b} AS ${q(BUCKET)}, CAST(${sig} AS VARCHAR(20)) AS ${q(SIG)}, ${ALIAS}.* FROM ${from}${where}`)).map(
+        toBucketedRow,
+      );
     },
     async close() {
       await pool.close();

@@ -16,6 +16,13 @@ export interface RecorderOptions {
   tables?: string[];
   ignoreColumns?: string[];
   maxRows?: number;
+  /**
+   * Re-read only the parts of each table that changed, using row versions or row hashes computed
+   * by the database (PostgreSQL, MySQL, SQL Server, Oracle). Default true.
+   */
+  incremental?: boolean;
+  /** Rows per bucket for incremental reads. Smaller buckets mean less to re-read after a change. Default 256. */
+  rowsPerBucket?: number;
 }
 
 /**
@@ -27,6 +34,7 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
   private last?: Snapshot;
   private watched: TableRef[] = [];
   private readonly keyCache = new Map<string, string[]>();
+  private readonly fullRead = new Map<string, string>();
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -90,6 +98,11 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
     return step;
   }
 
+  /** Tables the database can't read incrementally, so each checkpoint reads them in full, with the reason. */
+  fullReadTables(): { table: TableRef; reason: string }[] {
+    return this.watched.filter((t) => this.fullRead.has(tableId(t))).map((t) => ({ table: t, reason: this.fullRead.get(tableId(t))! }));
+  }
+
   /** Tables that were too large to snapshot in the latest snapshot. */
   skippedTables(): { table: TableRef; rowCount: number; error?: string }[] {
     return (this.last?.tables ?? [])
@@ -98,7 +111,14 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
   }
 
   private snapshot(): Promise<Snapshot> {
-    return takeSnapshot(this.db, this.watched, { maxRows: this.options.maxRows, keyCache: this.keyCache });
+    return takeSnapshot(this.db, this.watched, {
+      maxRows: this.options.maxRows,
+      keyCache: this.keyCache,
+      previous: this.last,
+      incremental: this.options.incremental,
+      rowsPerBucket: this.options.rowsPerBucket,
+      fullRead: this.fullRead,
+    });
   }
 }
 

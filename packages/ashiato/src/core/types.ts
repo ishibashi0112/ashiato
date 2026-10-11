@@ -18,6 +18,18 @@ export interface TableSnapshot {
   skipped?: boolean;
   error?: string;
   rowCount: number;
+  /** Set when the table was read by buckets, so the next snapshot can re-read only the buckets that changed. */
+  buckets?: BucketState;
+}
+
+export interface BucketState {
+  /** Number of buckets the rows are spread over. */
+  count: number;
+  rows: Map<number, Row[]>;
+  /** `count:sum` of each non-empty bucket, compared with the database's at the next snapshot. */
+  sums: Map<number, string>;
+  /** Buckets read again for this snapshot; the others are unchanged since the previous one. Undefined when all were read. */
+  changed?: Set<number>;
 }
 
 /** A watched table a step could not compare, and why. */
