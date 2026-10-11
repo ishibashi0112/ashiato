@@ -1,4 +1,4 @@
-import type { JsonValue, Row, Step, TableDiff } from "./types";
+import type { ActionInfo, JsonValue, Row, Step, TableDiff } from "./types";
 
 const tableName = (t: TableDiff) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
 const show = (v: JsonValue | undefined) => (v === null || v === undefined ? <i className="null">NULL</i> : String(v));
@@ -18,10 +18,38 @@ export function StepDetail({ step }: { step: Step }) {
       <p className="meta">
         {new Date(step.at).toLocaleString()} · read in {step.durationMs}ms{step.source ? ` · ${step.source}` : ""}
       </p>
+      {step.action && <ActionCard action={step.action} />}
+      {step.source === "sync" && (
+        <p className="hint">These rows changed while no action was running (another user, a batch job, or the app itself).</p>
+      )}
       {step.diff.tables.length === 0 && <p className="hint">No rows changed in the watched tables.</p>}
       {step.diff.tables.map((t) => (
         <TableCard key={tableName(t)} t={t} />
       ))}
+    </div>
+  );
+}
+
+function ActionCard({ action }: { action: ActionInfo }) {
+  return (
+    <div className="card action">
+      <h3>
+        {action.type === "request" ? "Request without a user action" : `${action.type} ${action.target ?? ""}`}
+        {action.page && <span className="warn">{action.page}</span>}
+      </h3>
+      <table>
+        <tbody>
+          {action.requests.map((r, i) => (
+            <tr key={i}>
+              <td className="kind">{r.kind === "http" ? "HTTP" : r.kind === "rpc" ? "RPC" : "MSG"}</td>
+              <td>{r.method}</td>
+              <td className="url">{r.url ?? ""}</td>
+              <td className={r.error || (r.status ?? 0) >= 400 ? "del" : ""}>{r.error ?? r.status ?? ""}</td>
+              <td className="same">{r.durationMs !== undefined ? `${r.durationMs}ms` : ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

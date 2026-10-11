@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join, normalize } from "node:path";
-import type { Session, Step } from "../core/types.js";
+import { countChanges } from "../core/diff.js";
+import type { CheckpointOptions } from "../core/recorder.js";
+import type { ActionInfo, Session, Step } from "../core/types.js";
 
 export interface ServerOptions {
   port: number;
@@ -10,7 +12,7 @@ export interface ServerOptions {
   uiDir?: string;
   getSession: () => Session;
   /** Omit for read-only viewing of a saved session. */
-  checkpoint?: (label: string, source: string) => Promise<Step>;
+  checkpoint?: (label: string, source: string, options: CheckpointOptions) => Promise<Step | null>;
   /** Subscribe to new steps; returns an unsubscribe function. */
   onStep?: (listener: (step: Step) => void) => () => void;
 }
@@ -37,12 +39,24 @@ export function startServer(options: ServerOptions): Promise<Server> {
   });
 }
 
+const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+
 async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOptions) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "content-type");
-  if (req.method === "OPTIONS") return void res.writeHead(204).end();
+  // DNS rebinding: a page on evil.example resolving to 127.0.0.1 would otherwise be same-origin.
+  const host = req.headers.host ?? "";
+  if (!LOOPBACK.test(host) && host.split(":")[0] !== o.host) return sendJson(res, 403, { error: "Forbidden host" });
 
   const url = new URL(req.url ?? "/", "http://localhost");
+  const origin = req.headers.origin;
+  const crossOrigin = origin !== undefined && origin !== `http://${host}`;
+
+  // Only the checkpoint endpoint is open to other origins (the app under test runs on its own dev server).
+  // Its cross-origin reply carries no row data, so other web pages open in the browser can't read the database.
+  if (url.pathname === "/api/checkpoint") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "content-type");
+    if (req.method === "OPTIONS") return void res.writeHead(204).end();
+  }
 
   if (url.pathname === "/api/session" && req.method === "GET") {
     return sendJson(res, 200, { ...o.getSession(), live: Boolean(o.checkpoint) });
@@ -50,9 +64,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
 
   if (url.pathname === "/api/checkpoint" && req.method === "POST") {
     if (!o.checkpoint) return sendJson(res, 405, { error: "This session is read-only" });
-    const body = (await readJson(req)) as { label?: string; source?: string };
-    const step = await o.checkpoint(body.label?.trim() || "checkpoint", body.source ?? "http");
-    return sendJson(res, 200, step);
+    const body = (await readJson(req)) as { label?: string; source?: string; action?: ActionInfo; dropIfEmpty?: boolean };
+    const step = await o.checkpoint(body.label?.trim() || "checkpoint", body.source ?? "http", {
+      action: body.action,
+      dropIfEmpty: body.dropIfEmpty === true,
+    });
+    if (!step) return sendJson(res, 200, { dropped: true });
+    return sendJson(res, 200, crossOrigin ? { id: step.id, changes: countChanges(step.diff) } : step);
   }
 
   if (url.pathname === "/api/events" && req.method === "GET") {

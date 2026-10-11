@@ -60,6 +60,10 @@ aside ol { list-style: none; margin: 0; padding: 0; }
 aside li { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
 aside li:hover { background: var(--bg); }
 aside li.active { background: var(--bg); outline: 1px solid var(--accent); }
+aside li.outside .step-label { font-style: italic; color: var(--muted); }
+.card.action td { white-space: nowrap; width: 1px; }
+.card.action td.url { white-space: normal; word-break: break-all; width: auto; }
+.source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .row { display: flex; justify-content: space-between; gap: 8px; }
 .small { font-size: 12px; }
 .step-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

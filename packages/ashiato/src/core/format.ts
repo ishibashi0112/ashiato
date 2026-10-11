@@ -17,7 +17,8 @@ function keyText(key: string[], row: Row): string {
 /** Human-readable summary of one step for the terminal. */
 export function formatStep(step: Step, maxRowsPerKind = 5): string {
   const c = countChanges(step.diff);
-  const lines = [`#${step.id} ${step.label}  ${dim(`(+${c.inserted} ~${c.updated} -${c.deleted}, ${step.durationMs}ms)`)}`];
+  const via = step.source && !["manual", "http", "ui"].includes(step.source) && step.source !== step.label ? `  ${dim(step.source)}` : "";
+  const lines = [`#${step.id} ${step.label}${via}  ${dim(`(+${c.inserted} ~${c.updated} -${c.deleted}, ${step.durationMs}ms)`)}`];
   if (step.diff.tables.length === 0) lines.push(dim("  no changes"));
   for (const t of step.diff.tables) {
     lines.push(`  ${tableId(t.table)}`);

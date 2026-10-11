@@ -106,7 +106,11 @@ export function App() {
             {steps.map((s) => {
               const c = count(s);
               return (
-                <li key={s.id} className={s.id === selected ? "active" : ""} onClick={() => setSelected(s.id)}>
+                <li
+                  key={s.id}
+                  className={[s.id === selected ? "active" : "", s.source === "sync" ? "outside" : ""].join(" ")}
+                  onClick={() => setSelected(s.id)}
+                >
                   <div className="row">
                     <span className="step-label">
                       #{s.id} {s.label}

@@ -47,6 +47,7 @@ jobs:
       ASHIATO_TEST_MYSQL_URL: mysql://root:ashiato@127.0.0.1:3306/ashiato
       ASHIATO_TEST_MSSQL_URL: mssql://sa:Ashiato%232026@127.0.0.1:1433/master
       ASHIATO_TEST_ORACLE_URL: oracle://ashiato:ashiato@127.0.0.1:1521/FREEPDB1
+      ASHIATO_REQUIRE_E2E: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -56,5 +57,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm --filter ashiato exec playwright-core install --with-deps chromium
+      # the browser test injects the built client script
       - run: pnpm build
+      - run: pnpm test
