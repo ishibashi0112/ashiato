@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { emptyReplay, loadReplay, useScreenRecorder, type ReplayState, type ReplayTabs } from "./Screen";
-import { StepDetail } from "./StepDetail";
+import { StepDetail, tableId } from "./StepDetail";
 import type { Session, Step, VideoInfo } from "./types";
 
 type LiveSession = Session & { live?: boolean };
@@ -18,6 +18,13 @@ export function count(step: Step) {
 }
 
 const time = (iso: string) => new Date(iso).toLocaleTimeString();
+
+/** Adds a step from the event stream, and the tables it started or stopped watching. */
+function withStep(session: LiveSession, step: Step): LiveSession {
+  const gone = new Set((step.removedTables ?? []).map(tableId));
+  const tables = [...session.tables.filter((t) => !gone.has(tableId(t))), ...(step.addedTables ?? [])];
+  return { ...session, steps: [...session.steps, step], tables };
+}
 
 export function App() {
   const [session, setSession] = useState<LiveSession>();
@@ -86,7 +93,7 @@ export function App() {
         });
         es.addEventListener("step", (e) => {
           const step = JSON.parse((e as MessageEvent<string>).data) as Step;
-          setSession((prev) => (prev && !prev.steps.some((x) => x.id === step.id) ? { ...prev, steps: [...prev.steps, step] } : prev));
+          setSession((prev) => (prev && !prev.steps.some((x) => x.id === step.id) ? withStep(prev, step) : prev));
           follow(step.id);
           // the page sends its replay events every second: fetch them once this action's have arrived
           setTimeout(() => setReplayVersion((v) => v + 1), 1500);
@@ -100,7 +107,7 @@ export function App() {
   }, []);
 
   const steps = useMemo(
-    () => (session?.steps ?? []).filter((s) => !hideEmpty || s.diff.tables.length > 0),
+    () => (session?.steps ?? []).filter((s) => !hideEmpty || s.diff.tables.length > 0 || s.addedTables || s.removedTables),
     [session, hideEmpty],
   );
   const current = session?.steps.find((s) => s.id === selected);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { BucketedRow, BucketSum, DbAdapter } from "../src/adapters/types.js";
+import type { BucketedRow, BucketSum, DbAdapter, ListedTable } from "../src/adapters/types.js";
 import { Recorder } from "../src/core/recorder.js";
 import type { Row, Step, TableRef } from "../src/core/types.js";
 
@@ -10,16 +10,22 @@ import type { Row, Step, TableRef } from "../src/core/types.js";
 class FakeDb implements DbAdapter {
   readonly dialect = "fake";
   private version = 0;
-  readonly tables = new Map<string, { key: string[]; rows: { row: Row; version: number }[] }>();
+  readonly tables = new Map<string, { key: string[]; rows: { row: Row; version: number }[]; definition: number }>();
   readonly reads: { table: string; which?: number[] }[] = [];
+  /** Tables the recorder told to forget their cached metadata. */
+  readonly forgotten: string[] = [];
   failBuckets = new Set<string>();
   /** Tables that can't be read at all (dropped, permission revoked). */
   unreadable = new Set<string>();
   /** Runs inside readBuckets, after the sums were taken: simulates the app writing in between. */
   duringRead?: () => void;
 
+  /** Creates the table, or drops and creates it again. */
   create(name: string, key: string[], rows: Row[] = []) {
-    this.tables.set(name, { key, rows: rows.map((row) => ({ row, version: ++this.version })) });
+    this.tables.set(name, { key, rows: rows.map((row) => ({ row, version: ++this.version })), definition: ++this.version });
+  }
+  drop(name: string) {
+    this.tables.delete(name);
   }
   insert(name: string, row: Row) {
     this.t(name).rows.push({ row, version: ++this.version });
@@ -45,8 +51,11 @@ class FakeDb implements DbAdapter {
     return (h >>> 0) % n;
   }
 
-  async listTables(): Promise<TableRef[]> {
-    return [...this.tables.keys()].map((name) => ({ name }));
+  async listTables(): Promise<ListedTable[]> {
+    return [...this.tables].map(([name, t]) => ({ name, version: String(t.definition) }));
+  }
+  forget(t: TableRef) {
+    this.forgotten.push(t.name);
   }
   async primaryKey(t: TableRef) {
     return this.t(t.name).key;
@@ -232,6 +241,101 @@ describe("incremental reads", () => {
     expect(db.reads).toEqual([]);
     db.insert("logs", { m: "c" });
     expect(only(await recorder.checkpoint("log")).inserted).toEqual([{ m: "c" }]);
+  });
+
+  it("watches a table created while recording, re-reading only what changed from then on", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(10));
+    const recorder = new Recorder(db, { rowsPerBucket: 10 });
+    await recorder.start();
+    db.create("work", ["id"], items(100));
+    db.reads.length = 0;
+    const created = await recorder.checkpoint("create");
+    expect(created.addedTables).toEqual([{ name: "work" }]);
+    expect(only(created).inserted).toHaveLength(100);
+    expect(db.reads).toEqual([{ table: "work", which: undefined }]);
+    expect(recorder.session.tables).toEqual([{ name: "stock" }, { name: "work" }]);
+
+    db.reads.length = 0;
+    db.update("work", (r) => r.id === 50, { qty: 0 });
+    expect(only(await recorder.checkpoint("update")).updated).toHaveLength(1);
+    expect(db.reads).toHaveLength(1);
+    expect(db.reads[0]!.which).toHaveLength(1);
+  });
+
+  it("reads a table created again in full, with what was cached about it forgotten", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(100));
+    db.failBuckets.add("stock");
+    const recorder = new Recorder(db, { rowsPerBucket: 10 });
+    await recorder.start();
+    expect(recorder.fullReadTables()).toHaveLength(1);
+
+    // same rows, but now keyed by note: the cached key [id] must not be used
+    db.failBuckets.clear();
+    db.create("stock", ["note"], items(100));
+    db.update("stock", (r) => r.id === 5, { qty: 0 });
+    db.reads.length = 0;
+    const step = await recorder.checkpoint("re-create");
+    expect(db.forgotten).toEqual(["stock"]);
+    expect(step.addedTables).toBeUndefined();
+    expect(only(step).key).toEqual(["note"]);
+    expect(only(step).updated.map((u) => [u.key, u.changed])).toEqual([[{ note: "item 5" }, ["qty"]]]);
+    expect(only(step).inserted).toEqual([]);
+    // bucket reads work for the new table: it is no longer read in full
+    expect(db.reads).toEqual([{ table: "stock", which: undefined }]);
+    expect(recorder.fullReadTables()).toEqual([]);
+
+    db.reads.length = 0;
+    expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
+    expect(db.reads).toEqual([]);
+    expect(db.forgotten).toEqual(["stock"]);
+  });
+
+  it("stops reading a table that is gone, and says so once", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(3));
+    db.create("work", ["id"], items(2));
+    const recorder = new Recorder(db);
+    await recorder.start();
+    db.drop("work");
+    const sync = await recorder.checkpoint("outside actions", "sync", { dropIfEmpty: true });
+    expect(sync?.removedTables).toEqual([{ name: "work" }]);
+    expect(sync?.diff.tables).toEqual([]);
+    expect(sync?.skipped).toBeUndefined();
+    expect(db.forgotten).toEqual(["work"]);
+    expect(recorder.session.tables).toEqual([{ name: "stock" }]);
+    expect(await recorder.checkpoint("outside actions", "sync", { dropIfEmpty: true })).toBeNull();
+
+    // created again later: a new table, compared with nothing
+    db.create("work", ["id"], items(1));
+    const back = await recorder.checkpoint("create again");
+    expect(back.addedTables).toEqual([{ name: "work" }]);
+    expect(only(back).inserted).toEqual(items(1));
+  });
+
+  it("keeps a checkpoint that would be dropped for having no changes when a table appeared", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(1));
+    const recorder = new Recorder(db);
+    await recorder.start();
+    db.create("empty", ["id"]);
+    const sync = await recorder.checkpoint("outside actions", "sync", { dropIfEmpty: true });
+    expect(sync?.addedTables).toEqual([{ name: "empty" }]);
+    expect(sync?.diff.tables).toEqual([]);
+  });
+
+  it("keeps watching the same tables when listing them fails", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(2));
+    const recorder = new Recorder(db);
+    await recorder.start();
+    db.listTables = () => Promise.reject(new Error("connection reset"));
+    db.update("stock", (r) => r.id === 1, { qty: 0 });
+    const step = await recorder.checkpoint("update");
+    expect(only(step).updated).toHaveLength(1);
+    expect(step.removedTables).toBeUndefined();
+    expect(db.forgotten).toEqual([]);
   });
 
   it("keeps a checkpoint that would be dropped for having no changes when a table just became unreadable", async () => {

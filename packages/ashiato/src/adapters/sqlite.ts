@@ -19,10 +19,12 @@ export async function connectSqlite(path: string): Promise<DbAdapter> {
   return {
     dialect: "sqlite",
     async listTables() {
-      // ordinary tables only: no virtual tables (their module may not be loaded) or FTS shadow tables
+      // ordinary tables only: no virtual tables (their module may not be loaded) or FTS shadow tables.
+      // Version: the CREATE TABLE statement, which ALTER TABLE rewrites.
       return all(
-        "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
-      ).map((r) => ({ name: String(r.name) }));
+        `SELECT l.name, s.sql FROM pragma_table_list l LEFT JOIN sqlite_schema s ON s.type = 'table' AND s.name = l.name
+          WHERE l.schema = 'main' AND l.type = 'table' AND l.name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY l.name`,
+      ).map((r) => ({ name: String(r.name), version: String(r.sql) }));
     },
     async primaryKey(t: TableRef) {
       return all(`PRAGMA table_info(${q(t.name)})`)

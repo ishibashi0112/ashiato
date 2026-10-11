@@ -75,6 +75,35 @@ describe("diffSnapshots", () => {
     expect(t?.updated).toEqual([]);
   });
 
+  it("counts the rows of a new table as inserted, and leaves out a table that is gone", () => {
+    const orders = snap([{ id: 1 }, { id: 2 }]);
+    const none: Snapshot = { takenAt: "t0", tables: [] };
+    expect(diffSnapshots(none, orders).tables).toEqual([
+      { table: { name: "orders" }, key: ["id"], inserted: [{ id: 1 }, { id: 2 }], deleted: [], updated: [] },
+    ]);
+    // dropped, or only no longer readable: its rows weren't necessarily deleted
+    expect(diffSnapshots(orders, none).tables).toEqual([]);
+    expect(diffSnapshots(none, snap([], ["id"])).tables).toEqual([]);
+  });
+
+  it("treats a column added or dropped in between as NULL where it is missing", () => {
+    const before = snap([
+      { id: 1, qty: 5 },
+      { id: 2, qty: 3 },
+    ]);
+    const after = snap([
+      { id: 1, qty: 5, note: null },
+      { id: 2, qty: 3, note: "rush" },
+    ]);
+    const [t] = diffSnapshots(before, after).tables;
+    expect(t?.updated.map((u) => [u.key, u.changed])).toEqual([[{ id: 2 }, ["note"]]]);
+    expect(diffSnapshots(after, before).tables[0]?.updated.map((u) => [u.key, u.changed])).toEqual([[{ id: 2 }, ["note"]]]);
+
+    const [m] = diffSnapshots(snap([{ v: 1 }, { v: 2 }], []), snap([{ v: 1, w: null }, { v: 2, w: 0 }], [])).tables;
+    expect(m?.deleted).toEqual([{ v: 2 }]);
+    expect(m?.inserted).toEqual([{ v: 2, w: 0 }]);
+  });
+
   it("skips tables that were too large to read", () => {
     const before = snap([{ id: 1 }]);
     const after: Snapshot = { takenAt: "t2", tables: [{ ...before.tables[0]!, rows: [], skipped: true, rowCount: 10 }] };

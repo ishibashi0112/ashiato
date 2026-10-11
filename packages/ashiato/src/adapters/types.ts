@@ -14,13 +14,23 @@ export interface BucketSum {
   sum: bigint;
 }
 
+/** A table as `listTables` returns it. */
+export interface ListedTable extends TableRef {
+  /**
+   * Optional. Changes whenever the table is created again or its definition is altered (columns,
+   * primary key), so that what was cached about it is read again: compared as text, never parsed.
+   */
+  version?: string;
+}
+
 /**
  * A read-only view of a database. Every method must work with SELECT permission only:
  * no triggers, no CDC, no setting changes.
  */
 export interface DbAdapter {
   readonly dialect: string;
-  listTables(): Promise<TableRef[]>;
+  /** Called at each checkpoint too, so tables created after recording started are watched as well. */
+  listTables(): Promise<ListedTable[]>;
   primaryKey(table: TableRef): Promise<string[]>;
   countRows(table: TableRef): Promise<number>;
   readRows(table: TableRef): Promise<Row[]>;
@@ -36,5 +46,7 @@ export interface DbAdapter {
   bucketSums?(table: TableRef, key: string[], buckets: number): Promise<Map<number, BucketSum>>;
   /** Rows of the given buckets (all buckets when `which` is omitted), normalized like `readRows`. */
   readBuckets?(table: TableRef, key: string[], buckets: number, which?: number[]): Promise<BucketedRow[]>;
+  /** Optional. Drops what the adapter cached about a table (column lists...): it was created again, altered, or is gone. */
+  forget?(table: TableRef): void;
   close(): Promise<void>;
 }

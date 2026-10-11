@@ -93,18 +93,92 @@ describe("Recorder", () => {
     expect(grown.diff.tables.map((t) => t.table.name)).toEqual(["orders"]);
     expect(grown.skipped).toEqual([{ table: { name: "stock" }, reason: "3 rows (more than max rows 2)" }]);
 
-    // a dropped table doesn't stop the other tables from being recorded
+    // a dropped table is no longer watched
     db.exec("DELETE FROM stock WHERE item_id = 5; DROP TABLE audit_log; UPDATE orders SET qty = 2");
     const dropped = await recorder.checkpoint("drop");
     expect(dropped.diff.tables.map((t) => t.table.name)).toEqual(["orders"]);
-    expect(dropped.skipped?.map((s) => [s.table.name, s.reason.split(":")[0]])).toEqual([
-      ["audit_log", "could not be read"],
+    expect(dropped.removedTables).toEqual([{ name: "audit_log" }]);
+    expect(dropped.skipped?.map((s) => [s.table.name, s.reason])).toEqual([
       ["stock", "not read at the previous checkpoint, so nothing to compare with yet"],
     ]);
 
     db.exec("UPDATE stock SET qty = 0");
     const back = await recorder.checkpoint("back");
     expect(back.diff.tables.map((t) => t.table.name)).toEqual(["stock"]);
+  });
+
+  it("watches tables created after recording started", async () => {
+    const { file, db } = createAppDb();
+    adapter = await connect(`sqlite:${file}`);
+    const recorder = new Recorder(adapter);
+    await recorder.start();
+
+    db.exec("CREATE TABLE work (id INTEGER PRIMARY KEY, total INTEGER); INSERT INTO work VALUES (1, 100), (2, 200)");
+    const created = await recorder.checkpoint("create");
+    expect(created.addedTables).toEqual([{ name: "work" }]);
+    expect(created.diff.tables.map((t) => [t.table.name, t.inserted])).toEqual([
+      [
+        "work",
+        [
+          { id: 1, total: 100 },
+          { id: 2, total: 200 },
+        ],
+      ],
+    ]);
+    expect(recorder.session.tables.map((t) => t.name)).toEqual(["audit_log", "orders", "stock", "work"]);
+
+    db.exec("UPDATE work SET total = 150 WHERE id = 1");
+    const upd = await recorder.checkpoint("update");
+    expect(upd.addedTables).toBeUndefined();
+    expect(upd.diff.tables[0]?.updated).toEqual([{ key: { id: 1 }, before: { id: 1, total: 100 }, after: { id: 1, total: 150 }, changed: ["total"] }]);
+
+    db.exec("DROP TABLE work");
+    const gone = await recorder.checkpoint("drop");
+    expect(gone.removedTables).toEqual([{ name: "work" }]);
+    expect(gone.diff.tables).toEqual([]);
+    expect(gone.skipped).toBeUndefined();
+    expect((await recorder.checkpoint("idle")).removedTables).toBeUndefined();
+  });
+
+  it("watches only new tables that match the selected names", async () => {
+    const { file, db } = createAppDb();
+    adapter = await connect(`sqlite:${file}`);
+    const recorder = new Recorder(adapter, { tables: ["orders"] });
+    await recorder.start();
+    db.exec("CREATE TABLE work (id INTEGER PRIMARY KEY); INSERT INTO work VALUES (1)");
+    // orders created again, in the same step: still watched, and compared with its rows before
+    db.exec("INSERT INTO orders VALUES (1, 1, 1, 'x'); DROP TABLE orders; CREATE TABLE orders (id INTEGER PRIMARY KEY, qty INTEGER)");
+    db.exec("INSERT INTO orders VALUES (2, 5)");
+    const step = await recorder.checkpoint("create");
+    expect(step.addedTables).toBeUndefined();
+    expect(step.removedTables).toBeUndefined();
+    expect(step.diff.tables.map((t) => [t.table.name, t.inserted])).toEqual([["orders", [{ id: 2, qty: 5 }]]]);
+    expect(recorder.session.tables).toEqual([{ name: "orders" }]);
+  });
+
+  it("uses the new definition of a table created again or altered", async () => {
+    const { file, db } = createAppDb();
+    db.exec("INSERT INTO orders VALUES (1, 7, 10, 'a'), (2, 7, 20, 'b')");
+    adapter = await connect(`sqlite:${file}`);
+    const recorder = new Recorder(adapter, { tables: ["orders"] });
+    await recorder.start();
+
+    // an added column is NULL in every row: no row changed, except the one the app wrote
+    db.exec("ALTER TABLE orders ADD COLUMN note TEXT; UPDATE orders SET note = 'rush' WHERE id = 2");
+    const altered = await recorder.checkpoint("alter");
+    expect(altered.diff.tables[0]?.updated.map((u) => [u.key, u.changed])).toEqual([[{ id: 2 }, ["note"]]]);
+
+    // created again without a primary key: the cached key must not be used
+    db.exec("DROP TABLE orders; CREATE TABLE orders (id INTEGER, qty INTEGER); INSERT INTO orders VALUES (1, 10), (2, 25)");
+    const recreated = await recorder.checkpoint("re-create");
+    const t = recreated.diff.tables[0]!;
+    expect(t.key).toEqual([]);
+    // compared as whole rows, so the dropped columns make every row differ
+    expect(t.deleted.map((r) => r.id)).toEqual([1, 2]);
+    expect(t.inserted).toEqual([
+      { id: 1, qty: 10 },
+      { id: 2, qty: 25 },
+    ]);
   });
 
   it("reads integers beyond 2^53 exactly", async () => {
