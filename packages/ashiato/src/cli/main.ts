@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { connect } from "../adapters/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
+import { MediaStore } from "../core/media.js";
 import { Recorder } from "../core/recorder.js";
 import { loadSession, saveSession, sessionPath } from "../core/store.js";
 import type { Step } from "../core/types.js";
@@ -70,7 +71,8 @@ export async function main(argv: string[]): Promise<void> {
     const file = rest[0];
     if (!file) throw new Error("Usage: ashiato show <session.json>");
     const session = loadSession(resolve(file));
-    await startServer({ port, uiDir: uiDir(), getSession: () => session });
+    const media = new MediaStore(resolve(file), session, undefined, true);
+    await listen(port, { uiDir: uiDir(), getSession: () => session, media });
     console.log(`Viewing ${file} at http://127.0.0.1:${port}  (Ctrl+C to quit)`);
     return;
   }
@@ -114,8 +116,8 @@ export async function main(argv: string[]): Promise<void> {
   });
 
   if (!values["no-ui"]) {
-    await startServer({
-      port,
+    const media = new MediaStore(file, session, () => saveSession(file, session));
+    await listen(port, {
       uiDir: uiDir(),
       getSession: () => session,
       checkpoint: (label, source, options) => recorder.checkpoint(label, source, options),
@@ -123,14 +125,21 @@ export async function main(argv: string[]): Promise<void> {
         recorder.on("step", listener);
         return () => recorder.off("step", listener);
       },
+      media,
+    }).catch(async (e: Error) => {
+      await db.close().catch(() => undefined);
+      throw e;
     });
     console.log(`Timeline: http://127.0.0.1:${port}`);
   }
   console.log("Press Enter for a checkpoint (optionally type a label first). Ctrl+C to stop.\n");
 
   const rl = createInterface({ input: process.stdin });
+  let pressed = 0;
   rl.on("line", (line) => {
-    recorder.checkpoint(line.trim() || `checkpoint ${session.steps.length + 1}`).catch((e: Error) => console.error(e.message));
+    // counted here, not from the step list: Enter pressed twice quickly would give the same label
+    pressed++;
+    recorder.checkpoint(line.trim() || `checkpoint ${pressed}`).catch((e: Error) => console.error(e.message));
   });
 
   const stop = async () => {
@@ -141,4 +150,16 @@ export async function main(argv: string[]): Promise<void> {
     process.exit(0);
   };
   process.on("SIGINT", () => void stop());
+}
+
+/** Starts the timeline server, with a clear message when the port is taken. */
+async function listen(port: number, options: Omit<Parameters<typeof startServer>[0], "port">) {
+  try {
+    return await startServer({ port, ...options });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") {
+      throw new Error(`Port ${port} is already in use (is another ashiato running?). Choose another one with --port <n>.`);
+    }
+    throw e;
+  }
 }

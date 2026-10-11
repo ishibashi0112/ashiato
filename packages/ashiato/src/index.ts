@@ -2,6 +2,7 @@ export { connect } from "./adapters/index.js";
 export type { DbAdapter } from "./adapters/types.js";
 export { countChanges, diffSnapshots, tableId, type DiffOptions } from "./core/diff.js";
 export { formatStep } from "./core/format.js";
+export { MediaStore } from "./core/media.js";
 export { normalizeRow, normalizeValue } from "./core/normalize.js";
 export { Recorder, selectTables, type CheckpointOptions, type RecorderOptions } from "./core/recorder.js";
 export { takeSnapshot, type SnapshotOptions } from "./core/snapshot.js";

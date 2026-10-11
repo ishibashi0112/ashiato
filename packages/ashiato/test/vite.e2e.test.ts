@@ -3,13 +3,16 @@
  * checkpoints that contain exactly the rows each click changed.
  * Needs the built client (`pnpm build`) and a Chromium for playwright-core.
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Browser, Page } from "playwright-core";
 import { createServer, type ViteDevServer } from "vite";
 import { connect } from "../src/adapters/index.js";
+import { MediaStore } from "../src/core/media.js";
 import { Recorder } from "../src/core/recorder.js";
 import type { Step } from "../src/core/types.js";
 import { startServer } from "../src/server/server.js";
@@ -17,9 +20,10 @@ import ashiato from "../src/vite/index.js";
 import { createAppDb } from "./helpers.js";
 
 const clientBuilt = existsSync(fileURLToPath(new URL("../dist/client.global.js", import.meta.url)));
+const uiDir = fileURLToPath(new URL("../dist/ui", import.meta.url));
 const chromium = await import("playwright-core").then((m) => m.chromium).catch(() => undefined);
 const browserPath = chromium?.executablePath();
-const canRun = clientBuilt && browserPath && existsSync(browserPath);
+const canRun = clientBuilt && existsSync(join(uiDir, "index.html")) && browserPath && existsSync(browserPath);
 if (process.env.ASHIATO_REQUIRE_E2E && !canRun) {
   throw new Error(`Browser test cannot run: client built=${clientBuilt}, chromium=${browserPath ?? "missing"}`);
 }
@@ -29,6 +33,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
   let page: Page;
   let vite: ViteDevServer;
   let recorder: Recorder;
+  let recorderUrl: string;
   const closers: (() => Promise<unknown>)[] = [];
   const app = createAppDb();
 
@@ -36,11 +41,19 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     const adapter = await connect(`sqlite:${app.file}`);
     recorder = new Recorder(adapter);
     const session = await recorder.start();
+    const media = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), session);
     const rec = await startServer({
       port: 0,
+      uiDir,
       getSession: () => session,
       checkpoint: (l, s, o) => recorder.checkpoint(l, s, o),
+      onStep: (listener) => {
+        recorder.on("step", listener);
+        return () => recorder.off("step", listener);
+      },
+      media,
     });
+    recorderUrl = `http://127.0.0.1:${(rec.address() as AddressInfo).port}`;
     closers.push(() => adapter.close(), () => new Promise((r) => rec.close(r)));
 
     vite = await createServer({
@@ -48,7 +61,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
       logLevel: "silent",
       server: { port: 0, host: "127.0.0.1" },
       plugins: [
-        ashiato({ recorder: `http://127.0.0.1:${(rec.address() as AddressInfo).port}`, settleMs: 50 }),
+        ashiato({ recorder: recorderUrl, settleMs: 50 }),
         {
           name: "fixture-api",
           configureServer(server) {
@@ -146,5 +159,84 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     expect(step.source).toBe("orders.save");
     expect(step.action?.requests[0]).toMatchObject({ kind: "rpc", method: "orders.save" });
     expect(table(step, "orders")?.inserted[0]?.id).toBe(2);
+  });
+
+  const replayEvents = async () => {
+    const text = await (await fetch(`${recorderUrl}/api/replay`)).text();
+    return text
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { tab: string; events: { type: number; timestamp: number; data: { source?: number; type?: number } }[] });
+  };
+
+  it("records the page for screen replay, in the same tab as the actions", async () => {
+    const step = await stepNamed('click button "保存"');
+    expect(step.action?.tab).toMatch(/^\w+$/);
+    await expect.poll(async () => (await replayEvents()).filter((b) => b.tab === step.action!.tab).length, { timeout: 5000 }).toBeGreaterThan(0);
+    const events = (await replayEvents()).filter((b) => b.tab === step.action!.tab).flatMap((b) => b.events);
+    // a full DOM snapshot, and the click itself (incremental snapshot, mouse interaction, click)
+    expect(events.some((e) => e.type === 2)).toBe(true);
+    const clickAt = Date.parse(step.action!.startedAt);
+    expect(events.some((e) => e.type === 3 && e.data.source === 2 && e.data.type === 2 && Math.abs(e.timestamp - clickAt) < 1000)).toBe(true);
+  });
+
+  it("replays a step in the timeline UI", async () => {
+    const ui = await browser.newPage();
+    const errors: string[] = [];
+    ui.on("pageerror", (e) => errors.push(e.message));
+    await ui.goto(recorderUrl);
+    const step = await stepNamed('click button "保存"');
+    await ui.locator("aside li", { hasText: `#${step.id} click button "保存"` }).click();
+    const replay = ui.frameLocator(".replay-frame iframe");
+    await expect.poll(() => replay.getByText("WebView保存").count(), { timeout: 10_000 }).toBe(1);
+    await ui.getByRole("button", { name: "▶ Play this action" }).click();
+    await ui.waitForTimeout(500);
+    expect(errors).toEqual([]);
+    await ui.close();
+  });
+
+  it("records the screen from the timeline UI and shows it for steps taken meanwhile", async () => {
+    const ui = await browser.newPage();
+    const errors: string[] = [];
+    ui.on("pageerror", (e) => errors.push(e.message));
+    // headless Chromium has no screen to share: hand out an animated canvas instead
+    await ui.addInitScript(() => {
+      navigator.mediaDevices.getDisplayMedia = async () => {
+        const canvas = Object.assign(document.createElement("canvas"), { width: 320, height: 180 });
+        const ctx = canvas.getContext("2d")!;
+        let n = 0;
+        setInterval(() => {
+          ctx.fillStyle = `hsl(${(n += 10) % 360} 80% 50%)`;
+          ctx.fillRect(0, 0, 320, 180);
+        }, 50);
+        return canvas.captureStream(15);
+      };
+    });
+    await ui.goto(recorderUrl);
+    await ui.getByRole("button", { name: "● Record screen" }).click();
+    await ui.waitForTimeout(1500);
+    const before = recorder.session.steps.length;
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect.poll(() => recorder.session.steps.slice(before).some((s) => s.label === 'click button "保存"'), { timeout: 10_000 }).toBe(true);
+    await ui.waitForTimeout(1500);
+    await ui.getByRole("button", { name: "■ Stop recording" }).click();
+    await expect.poll(() => recorder.session.videos?.[0]?.endedAt, { timeout: 10_000 }).toBeTruthy();
+
+    const step = recorder.session.steps.slice(before).find((s) => s.label === 'click button "保存"')!;
+    await ui.locator("aside li", { hasText: `#${step.id} click button "保存"` }).click();
+    await ui.getByRole("button", { name: "Video" }).click();
+    const video = ui.locator(".screen video");
+    // the player must be able to seek to the step inside the recording
+    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState), { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+    const seeked = await video.evaluate(
+      (v: HTMLVideoElement) =>
+        new Promise<number>((resolve) => {
+          v.addEventListener("seeked", () => resolve(v.currentTime), { once: true });
+          v.currentTime = 2;
+        }),
+    );
+    expect(seeked).toBeGreaterThan(1.5);
+    expect(errors).toEqual([]);
+    await ui.close();
   });
 });

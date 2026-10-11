@@ -73,6 +73,8 @@ export interface ActionInfo {
   target?: string;
   /** Page path when the action happened. */
   page?: string;
+  /** Browser tab the action happened in; matches the tab of its screen replay events. */
+  tab?: string;
   startedAt: string;
   requests: RequestInfo[];
 }
@@ -90,6 +92,15 @@ export interface Step {
   durationMs: number;
 }
 
+/** A screen recording made from the timeline UI. Files live next to the session file. */
+export interface VideoInfo {
+  id: number;
+  file: string;
+  mimeType: string;
+  startedAt: string;
+  endedAt?: string;
+}
+
 export interface Session {
   version: 1;
   id: string;
@@ -97,4 +108,7 @@ export interface Session {
   dialect: string;
   tables: TableRef[];
   steps: Step[];
+  /** Screen replay (rrweb DOM events, one JSON batch per line), next to the session file. */
+  replay?: { file: string };
+  videos?: VideoInfo[];
 }

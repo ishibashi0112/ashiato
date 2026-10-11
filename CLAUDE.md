@@ -8,9 +8,9 @@ Records which rows an app inserts, updates and deletes, using read-only (SELECT-
 - Database drivers (mssql, oracledb, pg, mysql2) are optional peer dependencies loaded with `loadDriver()`.
 
 ## Layout
-- `packages/ashiato` — the npm package: `src/core` (snapshot, diff, recorder), `src/adapters` (one file per database), `src/server` (HTTP API + static UI), `src/cli`, `src/vite` (Vite plugin, export `ashiato/vite`), `src/client` (browser script the plugin inlines: action tracker + fetch / XHR / WebView2 postMessage hooks; built as `dist/client.global.js`).
-- `packages/ui` — React timeline UI, built into `packages/ashiato/dist/ui`.
+- `packages/ashiato` — the npm package: `src/core` (snapshot, diff, recorder, media: replay/video files next to the session), `src/adapters` (one file per database), `src/server` (HTTP API + static UI), `src/cli`, `src/vite` (Vite plugin, export `ashiato/vite`), `src/client` (browser script the plugin inlines: action tracker + fetch / XHR / WebView2 postMessage hooks + rrweb screen replay recording; built as `dist/client.global.js`).
+- `packages/ui` — React timeline UI (step list, diffs, rrweb replay, screen recording via getDisplayMedia), built into `packages/ashiato/dist/ui`.
 
 ## Commands
-- `pnpm test` — unit + SQLite tests. Real servers run when `ASHIATO_TEST_{POSTGRES,MYSQL,MSSQL,ORACLE}_URL` is set (CI sets all four). The adapter test connects as a user granted only SELECT (Oracle also needs `ASHIATO_TEST_ORACLE_ADMIN_URL`), so permission-dependent catalog queries are covered. The real-browser Vite test (`test/vite.e2e.test.ts`) needs `pnpm build` first and a Chromium for playwright-core; CI sets `ASHIATO_REQUIRE_E2E=1` so it can't silently skip.
+- `pnpm test` — unit + SQLite tests. Real servers run when `ASHIATO_TEST_{POSTGRES,MYSQL,MSSQL,ORACLE}_URL` is set (CI sets all four). The adapter test connects as a user granted only SELECT (Oracle also needs `ASHIATO_TEST_ORACLE_ADMIN_URL`), so permission-dependent catalog queries are covered. The real-browser Vite test (`test/vite.e2e.test.ts`, also covers the timeline UI replay and screen recording) needs `pnpm build` first and a Chromium for playwright-core; CI sets `ASHIATO_REQUIRE_E2E=1` so it can't silently skip.
 - `pnpm typecheck`, `pnpm build`

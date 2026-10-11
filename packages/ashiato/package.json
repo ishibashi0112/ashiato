@@ -29,12 +29,24 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./vite": {
-      "types": "./dist/vite.d.ts",
-      "import": "./dist/vite.js"
+      "import": {
+        "types": "./dist/vite.d.ts",
+        "default": "./dist/vite.js"
+      },
+      "require": {
+        "types": "./dist/vite.d.cts",
+        "default": "./dist/vite.cjs"
+      }
     }
   },
   "files": [
@@ -80,6 +92,7 @@
     "oracledb": "^26.0.0",
     "pg": "^8.23.1",
     "playwright-core": "1.56.1",
+    "rrweb": "2.1.6",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.7",

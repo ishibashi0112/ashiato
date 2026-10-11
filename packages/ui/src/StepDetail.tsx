@@ -1,4 +1,6 @@
-import type { ActionInfo, JsonValue, Row, Step, TableDiff } from "./types";
+import { useMemo, useState } from "react";
+import { ScreenPanel, type ReplayTabs } from "./Screen";
+import type { ActionInfo, JsonValue, Row, Step, TableDiff, VideoInfo } from "./types";
 
 const tableName = (t: { table: TableDiff["table"] }) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
 const show = (v: JsonValue | undefined) => (v === null || v === undefined ? <i className="null">NULL</i> : String(v));
@@ -9,7 +11,7 @@ function columnsOf(rows: Row[]): string[] {
   return cols;
 }
 
-export function StepDetail({ step }: { step: Step }) {
+export function StepDetail({ step, replay, videos }: { step: Step; replay: ReplayTabs; videos: VideoInfo[] }) {
   return (
     <div className="detail">
       <h2>
@@ -18,6 +20,7 @@ export function StepDetail({ step }: { step: Step }) {
       <p className="meta">
         {new Date(step.at).toLocaleString()} · read in {step.durationMs}ms{step.source ? ` · ${step.source}` : ""}
       </p>
+      <ScreenPanel step={step} replay={replay} videos={videos} />
       {step.action && <ActionCard action={step.action} />}
       {step.source === "sync" && (
         <p className="hint">These rows changed while no action was running (another user, a batch job, or the app itself).</p>
@@ -66,8 +69,17 @@ function ActionCard({ action }: { action: ActionInfo }) {
   );
 }
 
+/** Rows shown per kind before "Show all": a batch step can change 100,000 rows. */
+const ROW_LIMIT = 200;
+
 function TableCard({ t }: { t: TableDiff }) {
-  const cols = columnsOf([...t.inserted, ...t.deleted, ...t.updated.map((u) => u.after)]);
+  const [all, setAll] = useState(false);
+  const limit = all ? Infinity : ROW_LIMIT;
+  const inserted = t.inserted.slice(0, limit);
+  const updated = t.updated.slice(0, limit);
+  const deleted = t.deleted.slice(0, limit);
+  const hidden = t.inserted.length + t.updated.length + t.deleted.length - inserted.length - updated.length - deleted.length;
+  const cols = useMemo(() => columnsOf([...t.inserted, ...t.deleted, ...t.updated.map((u) => u.after)]), [t]);
   const isKey = (c: string) => t.key.includes(c);
   return (
     <div className="card">
@@ -93,7 +105,7 @@ function TableCard({ t }: { t: TableDiff }) {
             </tr>
           </thead>
           <tbody>
-            {t.inserted.map((r, i) => (
+            {inserted.map((r, i) => (
               <tr key={`i${i}`} className="ins-row">
                 <td className="kind">+</td>
                 {cols.map((c) => (
@@ -101,7 +113,7 @@ function TableCard({ t }: { t: TableDiff }) {
                 ))}
               </tr>
             ))}
-            {t.updated.map((u, i) => (
+            {updated.map((u, i) => (
               <tr key={`u${i}`} className="upd-row">
                 <td className="kind">~</td>
                 {cols.map((c) =>
@@ -119,7 +131,7 @@ function TableCard({ t }: { t: TableDiff }) {
                 )}
               </tr>
             ))}
-            {t.deleted.map((r, i) => (
+            {deleted.map((r, i) => (
               <tr key={`d${i}`} className="del-row">
                 <td className="kind">-</td>
                 {cols.map((c) => (
@@ -130,6 +142,11 @@ function TableCard({ t }: { t: TableDiff }) {
           </tbody>
         </table>
       </div>
+      {hidden > 0 && (
+        <button type="button" className="more" onClick={() => setAll(true)}>
+          Show {hidden} more rows
+        </button>
+      )}
     </div>
   );
 }
