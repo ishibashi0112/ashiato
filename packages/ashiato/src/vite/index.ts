@@ -14,6 +14,11 @@ export interface AshiatoViteOptions {
   syncBefore?: boolean;
   /** URL substrings never tracked. */
   ignore?: string[];
+  /**
+   * Record the page (DOM, not pixels) so the timeline can replay the screen around each action.
+   * Passwords are always masked; `{ maskAllInputs: true }` masks every input. Default true.
+   */
+  replay?: boolean | { maskAllInputs?: boolean };
   /** Set to false to turn the plugin off (also: ASHIATO=0). */
   enabled?: boolean;
 }
@@ -38,6 +43,7 @@ export default function ashiato(options: AshiatoViteOptions = {}): Plugin {
     oneWayMs: options.oneWayMs,
     syncBefore: options.syncBefore,
     ignore: options.ignore,
+    replay: options.replay,
   };
   let code: string | undefined;
 

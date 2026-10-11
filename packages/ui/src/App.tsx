@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { loadReplay, useScreenRecorder, type ReplayTabs } from "./Screen";
 import { StepDetail } from "./StepDetail";
-import type { Session, Step } from "./types";
+import type { Session, Step, VideoInfo } from "./types";
 
 type LiveSession = Session & { live?: boolean };
 
@@ -25,6 +26,21 @@ export function App() {
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [hideEmpty, setHideEmpty] = useState(false);
+  const [replay, setReplay] = useState<ReplayTabs>(new Map());
+  const [replayVersion, setReplayVersion] = useState(0);
+  const screen = useScreenRecorder((video: VideoInfo) =>
+    setSession((prev) => prev && { ...prev, videos: [...(prev.videos ?? []).filter((v) => v.id !== video.id), video] }),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    loadReplay()
+      .then((tabs) => !cancelled && setReplay(tabs))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [replayVersion]);
 
   useEffect(() => {
     let es: EventSource | undefined;
@@ -41,6 +57,8 @@ export function App() {
           const step = JSON.parse((e as MessageEvent<string>).data) as Step;
           setSession((prev) => (prev && !prev.steps.some((x) => x.id === step.id) ? { ...prev, steps: [...prev.steps, step] } : prev));
           setSelected(step.id);
+          // the page sends its replay events every second: fetch them once this action's have arrived
+          setTimeout(() => setReplayVersion((v) => v + 1), 1500);
         });
       })
       .catch((e: Error) => setError(e.message));
@@ -86,6 +104,12 @@ export function App() {
         </span>
         {session.live && <span className="live">● recording</span>}
         {session.live && (
+          <button type="button" className={screen.recording ? "rec on" : "rec"} onClick={screen.recording ? screen.stop : screen.start}>
+            {screen.recording ? "■ Stop recording" : "● Record screen"}
+          </button>
+        )}
+        {screen.error && <span className="del small">{screen.error}</span>}
+        {session.live && (
           <form onSubmit={checkpoint} className="checkpoint">
             <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. click Save)" />
             <button disabled={busy}>{busy ? "Reading…" : "Checkpoint"}</button>
@@ -128,7 +152,13 @@ export function App() {
             })}
           </ol>
         </aside>
-        <section>{current ? <StepDetail step={current} /> : <div className="empty">Select a step</div>}</section>
+        <section>
+          {current ? (
+            <StepDetail step={current} replay={replay} videos={session.videos ?? []} />
+          ) : (
+            <div className="empty">Select a step</div>
+          )}
+        </section>
       </main>
     </div>
   );

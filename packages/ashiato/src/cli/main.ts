@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { connect } from "../adapters/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
+import { MediaStore } from "../core/media.js";
 import { Recorder } from "../core/recorder.js";
 import { loadSession, saveSession, sessionPath } from "../core/store.js";
 import type { Step } from "../core/types.js";
@@ -70,7 +71,8 @@ export async function main(argv: string[]): Promise<void> {
     const file = rest[0];
     if (!file) throw new Error("Usage: ashiato show <session.json>");
     const session = loadSession(resolve(file));
-    await startServer({ port, uiDir: uiDir(), getSession: () => session });
+    const media = new MediaStore(resolve(file), session, undefined, true);
+    await startServer({ port, uiDir: uiDir(), getSession: () => session, media });
     console.log(`Viewing ${file} at http://127.0.0.1:${port}  (Ctrl+C to quit)`);
     return;
   }
@@ -110,6 +112,7 @@ export async function main(argv: string[]): Promise<void> {
   });
 
   if (!values["no-ui"]) {
+    const media = new MediaStore(file, session, () => saveSession(file, session));
     await startServer({
       port,
       uiDir: uiDir(),
@@ -119,6 +122,7 @@ export async function main(argv: string[]): Promise<void> {
         recorder.on("step", listener);
         return () => recorder.off("step", listener);
       },
+      media,
     });
     console.log(`Timeline: http://127.0.0.1:${port}`);
   }

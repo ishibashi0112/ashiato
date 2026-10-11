@@ -25,6 +25,8 @@ export interface TrackerOptions {
   syncBefore?: boolean;
   /** Upper bound for how long a request waits for the sync checkpoint. Default 5000ms. */
   syncTimeoutMs?: number;
+  /** Browser tab id recorded with each action (matches the tab's screen replay). */
+  tab?: string;
   now?: () => number;
   page?: () => string;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -60,7 +62,7 @@ export class Tracker {
   private sending: Promise<void> = Promise.resolve();
   /** The latest sync checkpoint; requests of later actions wait for it too, so they keep their order. */
   private gate: Promise<void> = Promise.resolve();
-  private readonly o: Required<Omit<TrackerOptions, "send">> & Pick<TrackerOptions, "send">;
+  private readonly o: Required<Omit<TrackerOptions, "send" | "tab">> & Pick<TrackerOptions, "send" | "tab">;
 
   constructor(options: TrackerOptions) {
     this.o = {
@@ -126,7 +128,7 @@ export class Tracker {
 
   private newAction(type: string, target: string | undefined, synthetic: boolean): Action {
     const started = this.o.now();
-    const info: ActionInfo = { type, target, page: this.o.page(), startedAt: new Date(started).toISOString(), requests: [] };
+    const info: ActionInfo = { type, target, page: this.o.page(), tab: this.o.tab, startedAt: new Date(started).toISOString(), requests: [] };
     const label = synthetic ? "request" : target ? `${type} ${target}` : type;
     return { info, label, pending: 0, started, done: false, synthetic };
   }

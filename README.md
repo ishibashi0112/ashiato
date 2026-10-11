@@ -66,7 +66,18 @@ export default defineConfig({
 | `oneWayMs` | `500` | Wait after a `postMessage` that gets no reply |
 | `syncBefore` | `true` | Checkpoint before each action so outside changes stay separate |
 | `ignore` | `[]` | URL substrings never tracked |
+| `replay` | `true` | Record the page for screen replay. `{ maskAllInputs: true }` hides every input value |
 | `enabled` | `true` | Also `ASHIATO=0` |
+
+## Screen replay and recording
+
+Select a step in the timeline and the **Screen** panel shows what the screen looked like when you did it. **▶ Play this action** plays it from just before the click to the checkpoint.
+
+![Screen replay](docs/replay.png)
+
+- **Replay (Vite plugin):** the page is recorded as DOM changes with [rrweb](https://github.com/rrweb-io/rrweb), not pixels, so it is light and sharp. Password fields are always masked. Each browser tab is kept apart.
+- **Video (any app):** press **● Record screen** in the timeline and pick a window or the whole screen. This works for anything on your desktop, such as a WinForms / WPF app with WebView2, not only the browser. The video is uploaded to the recorder every second, and each step jumps to its moment in the video.
+- Both stay on your machine, next to the session file: `<session>.replay.ndjson` and `<session>.video-<n>.webm`. `ashiato show` replays them too.
 
 ## Connection URLs
 
@@ -100,8 +111,12 @@ The recorder listens on `127.0.0.1` only.
 | `POST /api/checkpoint` `{ "label": "click Save", "source": "orders.save" }` | Take a checkpoint, returns the step |
 | `GET /api/session` | The whole session |
 | `GET /api/events` | Server-sent events, one `step` event per checkpoint |
+| `POST /api/replay` `{ "tab": "a1b2", "events": [...] }` | Append rrweb events (sent by the Vite plugin) |
+| `GET /api/replay` | All replay events, one `{ tab, events }` batch per line |
+| `POST /api/video`, `/api/video/:id/chunk`, `/api/video/:id/stop` | Screen recording upload (from the timeline UI only) |
+| `GET /api/video/:id` | A screen recording (supports `Range`) |
 
-This is what the upcoming browser integration (Vite plugin, WebView2 `postMessage` hooks) uses to take checkpoints automatically around each user action.
+Other web pages open in your browser can call `POST /api/checkpoint` and `POST /api/replay` (the app under test runs on another origin), but they can't read recorded rows, replays or videos back.
 
 ## Limits of read-only snapshots
 
@@ -114,7 +129,7 @@ This is what the upcoming browser integration (Vite plugin, WebView2 `postMessag
 
 1. ✅ Read-only snapshot diff, all major databases, CLI, timeline UI
 2. ✅ Vite plugin: checkpoint automatically around each user action (fetch / XHR / WebView2 `postMessage`)
-3. Screen replay (rrweb) and video synced with the timeline
+3. ✅ Screen replay (rrweb) and screen recording synced with the timeline
 4. Faster diffs for large tables (range hashing, `rowversion` / `ORA_ROWSCN`)
 5. Evidence export (Excel / PDF)
 6. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
@@ -167,6 +182,14 @@ export default defineConfig({
 - **操作外の変更は分ける**:操作の最初の通信を送る直前に一度記録します。他の人やバッチによる変更は「outside actions」として別に表示し、あなたの操作のせいにはしません
 - クリックを伴わない通信(画面表示時、ポーリング)は、変更があったときだけ記録します。通信のないクリックは記録しません
 
+### 画面リプレイと画面録画
+
+タイムラインでステップを選ぶと、**Screen** 欄にそのときの画面が表示されます。**▶ Play this action** で、クリックの直前からチェックポイントまでを再生します。
+
+- **リプレイ(Viteプラグイン)**:画面を動画ではなくDOMの変化として [rrweb](https://github.com/rrweb-io/rrweb) で記録するので、軽くて鮮明です。パスワード欄は常に伏せ字になり、すべての入力値を隠すなら `replay: { maskAllInputs: true }` を指定します。タブごとに分けて記録します
+- **録画(どのアプリでも)**:タイムラインの **● Record screen** を押し、ウィンドウか画面全体を選びます。ブラウザに限らず、WebView2 を使った WinForms / WPF アプリなどデスクトップ上の何でも録画できます。動画は1秒ごとにレコーダーへ送られ、各ステップは動画内のその時刻に移動します
+- どちらもセッションファイルの隣(`<session>.replay.ndjson`、`<session>.video-<n>.webm`)に保存され、外部には送られません。`ashiato show` でも再生できます
+
 ### 参照専用スナップショットの制限
 
 - チェックポイント間の比較なので、その間に同じ行が2回変わった場合は最終結果だけが見えます
@@ -178,7 +201,7 @@ export default defineConfig({
 
 1. ✅ 参照専用スナップショット差分・主要DB対応・CLI・タイムライン画面
 2. ✅ Viteプラグイン:操作ごとに自動でチェックポイント(fetch / XHR / WebView2 `postMessage`)
-3. タイムラインと同期した画面リプレイ(rrweb)・画面録画
+3. ✅ タイムラインと同期した画面リプレイ(rrweb)・画面録画
 4. 大きなテーブル向けの高速化(範囲ハッシュ比較、`rowversion` / `ORA_ROWSCN`)
 5. テスト証跡の出力(Excel / PDF)
 6. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー

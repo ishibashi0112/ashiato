@@ -1,4 +1,5 @@
-import type { ActionInfo, JsonValue, Row, Step, TableDiff } from "./types";
+import { ScreenPanel, type ReplayTabs } from "./Screen";
+import type { ActionInfo, JsonValue, Row, Step, TableDiff, VideoInfo } from "./types";
 
 const tableName = (t: TableDiff) => (t.table.schema ? `${t.table.schema}.${t.table.name}` : t.table.name);
 const show = (v: JsonValue | undefined) => (v === null || v === undefined ? <i className="null">NULL</i> : String(v));
@@ -9,7 +10,7 @@ function columnsOf(rows: Row[]): string[] {
   return cols;
 }
 
-export function StepDetail({ step }: { step: Step }) {
+export function StepDetail({ step, replay, videos }: { step: Step; replay: ReplayTabs; videos: VideoInfo[] }) {
   return (
     <div className="detail">
       <h2>
@@ -18,6 +19,7 @@ export function StepDetail({ step }: { step: Step }) {
       <p className="meta">
         {new Date(step.at).toLocaleString()} · read in {step.durationMs}ms{step.source ? ` · ${step.source}` : ""}
       </p>
+      <ScreenPanel step={step} replay={replay} videos={videos} />
       {step.action && <ActionCard action={step.action} />}
       {step.source === "sync" && (
         <p className="hint">These rows changed while no action was running (another user, a batch job, or the app itself).</p>
