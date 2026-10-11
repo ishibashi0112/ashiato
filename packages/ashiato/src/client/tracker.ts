@@ -56,6 +56,10 @@ export interface RequestHandle {
 export class Tracker {
   private current?: Action;
   private readonly active = new Set<Action>();
+  /** Checkpoints are sent one at a time so the recorder sees them in the order they happened. */
+  private sending: Promise<void> = Promise.resolve();
+  /** The latest sync checkpoint; requests of later actions wait for it too, so they keep their order. */
+  private gate: Promise<void> = Promise.resolve();
   private readonly o: Required<Omit<TrackerOptions, "send">> & Pick<TrackerOptions, "send">;
 
   constructor(options: TrackerOptions) {
@@ -131,12 +135,16 @@ export class Tracker {
   private syncFor(action: Action): Promise<void> {
     const othersBusy = [...this.active].some((a) => a !== action && !a.done);
     this.active.add(action);
-    if (!this.o.syncBefore || othersBusy) return Promise.resolve();
-    const sync = this.o
-      .send({ label: "outside actions", source: "sync", dropIfEmpty: true })
-      .catch(() => undefined);
+    if (!this.o.syncBefore || othersBusy) return this.gate;
+    const sync = this.send({ label: "outside actions", source: "sync", dropIfEmpty: true });
     const timeout = new Promise<void>((r) => this.o.setTimer(r, this.o.syncTimeoutMs));
-    return Promise.race([sync, timeout]);
+    return (this.gate = Promise.race([sync, timeout]));
+  }
+
+  private send(payload: CheckpointPayload): Promise<void> {
+    const sent = this.sending.then(() => this.o.send(payload)).catch(() => undefined);
+    this.sending = sent;
+    return sent;
   }
 
   private finish(action: Action): void {
@@ -149,9 +157,7 @@ export class Tracker {
       action.label = r.kind === "http" ? `${r.method} ${r.url ?? ""}`.trim() : r.method;
     }
     const source = summarize(action.info.requests);
-    void this.o
-      .send({ label: action.label, source, action: action.info, dropIfEmpty: action.synthetic })
-      .catch(() => undefined);
+    void this.send({ label: action.label, source, action: action.info, dropIfEmpty: action.synthetic });
   }
 }
 

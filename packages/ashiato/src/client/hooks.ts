@@ -70,7 +70,14 @@ export function hookXhr(win: Window & typeof globalThis, tracker: Tracker, ignor
     if (!meta || ignore(meta.url)) return send.call(this, body);
     const h: RequestHandle = tracker.beginRequest({ kind: "http", method: meta.method, url: meta.url });
     this.addEventListener("loadend", () => h.end(this.status ? { status: this.status } : { error: "network error" }));
-    void h.ready.then(() => send.call(this, body));
+    void h.ready.then(() => {
+      try {
+        send.call(this, body);
+      } catch (e) {
+        // e.g. abort() was called while the request waited for the sync checkpoint
+        h.end({ error: String(e) });
+      }
+    });
   };
 }
 

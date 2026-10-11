@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { connect } from "../src/adapters/index.js";
@@ -57,5 +58,40 @@ describe("server", () => {
     cleanups.push(() => new Promise((r) => server.close(r)));
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     expect((await fetch(`${base}/api/checkpoint`, { method: "POST" })).status).toBe(405);
+  });
+
+  it("gives other origins no row data and rejects foreign Host headers", async () => {
+    const { file, db } = createAppDb();
+    const adapter = await connect(`sqlite:${file}`);
+    const recorder = new Recorder(adapter);
+    await recorder.start();
+    const server = await startServer({
+      port: 0,
+      getSession: () => recorder.session,
+      checkpoint: (label, source, options) => recorder.checkpoint(label, source, options),
+    });
+    cleanups.push(() => adapter.close(), () => new Promise((r) => server.close(r)));
+    const port = (server.address() as AddressInfo).port;
+    const base = `http://127.0.0.1:${port}`;
+    const raw = (path: string, headers: Record<string, string>, method = "GET") =>
+      new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
+        const req = request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body }));
+        });
+        req.on("error", reject);
+        req.end(method === "POST" ? "{}" : undefined);
+      });
+
+    db.exec("UPDATE stock SET qty = 1 WHERE item_id = 3");
+    const cross = await raw("/api/checkpoint", { origin: "http://localhost:5173", "content-type": "application/json" }, "POST");
+    expect(cross.headers["access-control-allow-origin"]).toBe("*");
+    expect(JSON.parse(cross.body)).toEqual({ id: 1, changes: { inserted: 0, updated: 1, deleted: 0 } });
+
+    const session = await raw("/api/session", { origin: "http://evil.example" });
+    expect(session.headers["access-control-allow-origin"]).toBeUndefined();
+    expect((await raw("/api/session", { host: "evil.example:80" })).status).toBe(403);
+    expect((await fetch(`${base}/api/session`)).status).toBe(200);
   });
 });

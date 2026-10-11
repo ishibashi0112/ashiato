@@ -124,4 +124,51 @@ describe("Tracker", () => {
     await a.ready;
     expect(sent).toEqual([]);
   });
+
+  it("sends checkpoints one at a time, in order", async () => {
+    const log: string[] = [];
+    let release!: () => void;
+    const t = new Tracker({
+      page: () => "/",
+      send: (p) => {
+        log.push(`start ${p.label}`);
+        // the action's own checkpoint is slow (big snapshot)
+        const done = p.source === "sync" ? Promise.resolve() : new Promise<void>((r) => (release = r));
+        return done.then(() => void log.push(`end ${p.label}`));
+      },
+    });
+    t.userAction("click", "a");
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/a" });
+    await a.ready;
+    a.end({ status: 200 });
+    await flush(150);
+    t.userAction("click", "b");
+    const b = t.beginRequest({ kind: "http", method: "POST", url: "/b" });
+    let bReady = false;
+    void b.ready.then(() => (bReady = true));
+    await flush(0);
+    // b's sync must not overtake a's checkpoint, and b's request waits for it
+    expect(log).toEqual(["start outside actions", "end outside actions", "start click a"]);
+    expect(bReady).toBe(false);
+    release();
+    await flush(0);
+    expect(log.slice(3)).toEqual(["end click a", "start outside actions", "end outside actions"]);
+    expect(bReady).toBe(true);
+  });
+
+  it("keeps a later action's requests behind an earlier action's pending sync", async () => {
+    let release!: () => void;
+    const t = new Tracker({ page: () => "/", send: () => new Promise<void>((r) => (release = r)) });
+    const order: string[] = [];
+    t.userAction("click", "a");
+    void t.beginRequest({ kind: "rpc", method: "a" }).ready.then(() => order.push("a"));
+    await flush(400);
+    t.userAction("click", "b");
+    void t.beginRequest({ kind: "rpc", method: "b" }).ready.then(() => order.push("b"));
+    await flush(0);
+    expect(order).toEqual([]);
+    release();
+    await flush(0);
+    expect(order).toEqual(["a", "b"]);
+  });
 });
