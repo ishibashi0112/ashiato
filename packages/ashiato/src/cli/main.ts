@@ -26,7 +26,7 @@ Options:
                           oracle://user:pass@host:1521/service?schema=OWNER
                           postgres://user:pass@host:5432/db
                           mysql://user:pass@host:3306/db
-  --tables <list>         Comma-separated tables to watch (default: all)
+  --tables <list>         Comma-separated tables to watch (default: all, including ones created while recording)
   --ignore-columns <list> Columns ignored when detecting updates (e.g. updated_at)
   --max-rows <n>          Skip tables larger than this (default 100000)
   --full-read             Read every row at each checkpoint, not only the parts that changed

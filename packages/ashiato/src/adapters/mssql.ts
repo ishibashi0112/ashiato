@@ -99,10 +99,14 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
   return {
     dialect: "mssql",
     async listTables() {
+      // the base tables of INFORMATION_SCHEMA.TABLES. Version: object_id (a new one when created again)
+      // and modify_date, which every ALTER TABLE changes.
       const rows = await query(
-        "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_SCHEMA, TABLE_NAME",
+        `SELECT s.name AS TABLE_SCHEMA, o.name AS TABLE_NAME, CONCAT(o.object_id, ':', CONVERT(varchar(23), o.modify_date, 121)) AS version
+           FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
+          WHERE o.type = 'U' ORDER BY s.name, o.name`,
       );
-      return rows.map((r) => ({ schema: String(r.TABLE_SCHEMA), name: String(r.TABLE_NAME) }));
+      return rows.map((r) => ({ schema: String(r.TABLE_SCHEMA), name: String(r.TABLE_NAME), version: String(r.version) }));
     },
     async primaryKey(t) {
       const rows = await query(
@@ -143,6 +147,10 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
           return b;
         },
       );
+    },
+    forget(t) {
+      columnLists.delete(name(t));
+      rowversions.delete(name(t));
     },
     async close() {
       await pool.close();

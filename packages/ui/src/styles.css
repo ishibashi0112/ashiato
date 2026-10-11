@@ -109,7 +109,7 @@ button.rec.on { background: var(--del); color: #fff; }
 .screen-controls { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 button.more { margin: 8px 12px; background: transparent; color: var(--accent); border: 1px solid var(--border); }
 .card.skipped { border-color: var(--upd); }
-.card.skipped ul { margin: 0; padding: 8px 12px 8px 28px; font-size: 13px; }
+.card.skipped ul, .card.tables ul { margin: 0; padding: 8px 12px 8px 28px; font-size: 13px; }
 .empty { display: grid; place-items: center; height: 100%; color: var(--muted); }
 @media (max-width: 720px) {
   main { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; }

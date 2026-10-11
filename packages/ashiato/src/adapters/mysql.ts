@@ -68,11 +68,16 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
   return {
     dialect: "mysql",
     async listTables() {
+      // Version: CREATE_TIME, which every ALTER TABLE sets too (MySQL 8, MariaDB). It has whole
+      // seconds only, so a second ALTER within the same second could go unseen: until that second is
+      // surely over, the version is different at every call.
       const rows = await query(
-        `SELECT TABLE_SCHEMA AS s, TABLE_NAME AS n FROM information_schema.TABLES
+        `SELECT TABLE_SCHEMA AS s, TABLE_NAME AS n,
+                CONCAT(COALESCE(CREATE_TIME, ''), IF(CREATE_TIME > NOW() - INTERVAL 2 SECOND AND CREATE_TIME <= NOW(), CONCAT(' ', NOW(6)), '')) AS v
+           FROM information_schema.TABLES
           WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`,
       );
-      return rows.map((r) => ({ schema: String(r.s), name: String(r.n) }));
+      return rows.map((r) => ({ schema: String(r.s), name: String(r.n), version: String(r.v) }));
     },
     async primaryKey(t) {
       const rows = await query(
@@ -101,6 +106,9 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
       return (
         await query(`SELECT ${b} AS ${BUCKET}, CAST(${await sigOf(t)} AS CHAR) AS ${SIG}, ${ALIAS}.* FROM ${name(t)} AS ${ALIAS}${where}`)
       ).map(toBucketedRow);
+    },
+    forget(t) {
+      columns.delete(name(t));
     },
     async close() {
       await pool.end();

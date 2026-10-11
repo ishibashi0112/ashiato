@@ -107,14 +107,20 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
   return {
     dialect: "oracle",
     async listTables() {
-      // IOT overflow segments are listed too but can't be queried (ORA-25191)
+      // IOT overflow segments are listed too but can't be queried (ORA-25191).
+      // Version: OBJECT_ID (a new one when created again) and LAST_DDL_TIME, which every ALTER TABLE
+      // changes. That time has whole seconds only, so a second DDL within the same second could go
+      // unseen: until that second is surely over, the version is different at every call.
       const rows = await exec(
-        `SELECT OWNER, TABLE_NAME FROM ALL_TABLES
-          WHERE OWNER = :owner AND NESTED = 'NO' AND SECONDARY = 'N' AND (IOT_TYPE IS NULL OR IOT_TYPE = 'IOT')
-          ORDER BY TABLE_NAME`,
+        `SELECT t.OWNER, t.TABLE_NAME, TO_CHAR(o.OBJECT_ID) || ':' || TO_CHAR(o.LAST_DDL_TIME, 'YYYYMMDDHH24MISS')
+                || CASE WHEN o.LAST_DDL_TIME > SYSDATE - 2 / 86400 AND o.LAST_DDL_TIME <= SYSDATE THEN ':' || TO_CHAR(SYSTIMESTAMP, 'YYYYMMDDHH24MISSFF6') END AS V
+           FROM ALL_TABLES t
+           LEFT JOIN ALL_OBJECTS o ON o.OWNER = t.OWNER AND o.OBJECT_NAME = t.TABLE_NAME AND o.OBJECT_TYPE = 'TABLE' AND o.SUBOBJECT_NAME IS NULL
+          WHERE t.OWNER = :owner AND t.NESTED = 'NO' AND t.SECONDARY = 'N' AND (t.IOT_TYPE IS NULL OR t.IOT_TYPE = 'IOT')
+          ORDER BY t.TABLE_NAME`,
         { owner },
       );
-      return rows.map((r) => ({ schema: String(r.OWNER), name: String(r.TABLE_NAME) }));
+      return rows.map((r) => ({ schema: String(r.OWNER), name: String(r.TABLE_NAME), version: String(r.V) }));
     },
     async primaryKey(t) {
       const rows = await exec(
@@ -145,6 +151,9 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
       return (await exec(`SELECT ${b} AS "${BUCKET}", TO_CHAR(ORA_ROWSCN) AS "${SIG}", ${select(ALIAS)} FROM ${name(t)} ${ALIAS}${where}`)).map(
         toBucketedRow,
       );
+    },
+    forget(t) {
+      columnLists.delete(name(t));
     },
     async close() {
       await pool.close(0);

@@ -101,6 +101,19 @@ A table without a primary key is a single bucket: it is read again only when som
 
 Rows are kept in memory, so `--max-rows` still applies.
 
+## Tables created while recording
+
+The tables are listed again at every checkpoint. A table created while recording is watched from the first checkpoint that sees it: that step marks it as a new table and shows its rows as inserted. A table that is dropped (or can no longer be read) is reported once and no longer watched. A table that is created again or altered (`ALTER TABLE`) is read in full again, with its new columns and primary key. With `--tables`, only tables with those names are watched.
+
+The read-only user only sees the tables it may read. For new tables to be watched, let it read the whole schema rather than table by table:
+
+| Database | |
+| --- | --- |
+| SQL Server | `GRANT SELECT ON SCHEMA::dbo TO ashiato` (or the `db_datareader` role) |
+| Oracle | `GRANT READ ANY TABLE ON SCHEMA app TO ashiato` (23ai), or `GRANT READ ANY TABLE TO ashiato` |
+| PostgreSQL | `ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public GRANT SELECT ON TABLES TO ashiato` (or the `pg_read_all_data` role, 14+) |
+| MySQL / MariaDB | `GRANT SELECT ON appdb.* TO 'ashiato'@'%'` |
+
 ## Connection URLs
 
 | Database | URL | Driver |
@@ -117,7 +130,7 @@ The URL can also come from the `ASHIATO_DB_URL` environment variable.
 
 | Option | |
 | --- | --- |
-| `--tables a,b` | Tables to watch (default: all). `name` or `schema.name`, case-insensitive |
+| `--tables a,b` | Tables to watch (default: all, including tables created while recording). `name` or `schema.name`, case-insensitive |
 | `--ignore-columns updated_at` | Columns ignored when detecting updates |
 | `--max-rows 100000` | Tables larger than this are skipped (reported, not read) |
 | `--full-read` | Read every row at each checkpoint, not only the parts that changed |
@@ -147,7 +160,7 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 - On a shared development database, other people's changes during the same moment are included.
 - Tables without a primary key are compared row by row, so an update appears as a delete plus an insert.
 - The first snapshot reads the watched tables in full and keeps them in memory; later checkpoints re-read only what changed (see [Large tables](#large-tables)). Tables above `--max-rows` are skipped. A step lists any table it could not compare (too large, or unreadable).
-- Tables are chosen when recording starts; tables created later are not watched.
+- A table created and dropped again between two checkpoints is never seen. Tables created later are watched only if the read-only user can read them (see [Tables created while recording](#tables-created-while-recording)).
 
 ## Roadmap
 
@@ -187,6 +200,8 @@ npx ashiato record --db "mssql://user:pass@localhost:1433/devdb" --tables orders
 ```
 
 アプリを操作し、操作ごとにターミナルで **Enter** を押します(先にラベルを入力しても構いません)。タイムライン画面 <http://127.0.0.1:4100> の **Checkpoint** ボタンでも記録できます。**Ctrl+C** で終了すると、セッションが `.ashiato/sessions/` に保存されます。あとから `ashiato show <ファイル>` で見返せます。
+
+社内の SQL Server / Oracle と実際のアプリで試すときの手順は [docs/trial-guide.ja.md](docs/trial-guide.ja.md) にあります。
 
 ### Viteアプリから自動でチェックポイント
 
@@ -246,13 +261,26 @@ export default defineConfig({
 
 行はメモリに保持するので、`--max-rows` の上限はそのまま有効です。
 
+### 記録中に作られたテーブル
+
+チェックポイントのたびにテーブル一覧を取り直します。記録中に作られたテーブルは、それが見えた最初のチェックポイントから対象になり、そのステップでは新しいテーブルとして、中の行を追加として表示します。削除された(または読めなくなった)テーブルは一度だけ表示し、以降は対象から外します。作り直されたテーブルや `ALTER TABLE` で変更されたテーブルは、新しい列と主キーで全件読み直します。`--tables` を指定したときは、その名前のテーブルだけが対象です。
+
+参照専用ユーザーには、読み取りを許可されたテーブルしか見えません。新しく作られるテーブルも対象にするには、テーブルごとではなくスキーマ全体の参照を許可してください。
+
+| DB | |
+| --- | --- |
+| SQL Server | `GRANT SELECT ON SCHEMA::dbo TO ashiato`(または `db_datareader` ロール) |
+| Oracle | `GRANT READ ANY TABLE ON SCHEMA app TO ashiato`(23ai)、または `GRANT READ ANY TABLE TO ashiato` |
+| PostgreSQL | `ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public GRANT SELECT ON TABLES TO ashiato`(または `pg_read_all_data` ロール、14以降) |
+| MySQL / MariaDB | `GRANT SELECT ON appdb.* TO 'ashiato'@'%'` |
+
 ### 参照専用スナップショットの制限
 
 - チェックポイント間の比較なので、その間に同じ行が2回変わった場合は最終結果だけが見えます
 - 共有の開発DBでは、同じ時間帯に他の人が行った変更も含まれます
 - 主キーのないテーブルは行全体で比較するため、更新は「削除+追加」として表示されます
 - 最初のスナップショットで対象テーブルを全件読んでメモリに保持し、以降は変わった部分だけを読み直します(「大きなテーブル」参照)。`--max-rows` を超えるテーブルはスキップし、比較できなかったテーブル(大きすぎる・読めない)は各ステップに表示します
-- 対象テーブルは記録開始時に決まります。開始後に作られたテーブルは対象外です
+- 2つのチェックポイントの間に作られて削除されたテーブルは見えません。記録中に作られたテーブルは、参照専用ユーザーが読める場合だけ対象になります(「記録中に作られたテーブル」参照)
 
 ### ロードマップ
 

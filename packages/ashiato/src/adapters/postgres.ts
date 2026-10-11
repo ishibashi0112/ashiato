@@ -35,7 +35,7 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
   await query("SELECT 1");
 
   // Partitioned parents already return their partitions' rows; plain tables are read with ONLY so
-  // rows of inheriting child tables aren't counted twice. Filled by listTables (the recorder calls it first).
+  // rows of inheriting child tables aren't counted twice. Filled by listTables (the recorder calls it at each checkpoint).
   const partitioned = new Set<string>();
   const from = (t: TableRef) => (partitioned.has(name(t)) ? name(t) : `ONLY ${name(t)}`);
 
@@ -50,19 +50,25 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
   return {
     dialect: "postgres",
     async listTables() {
-      // pg_catalog rather than information_schema, which hides constraints from SELECT-only users
+      // pg_catalog rather than information_schema, which hides constraints from SELECT-only users.
+      // Version: the table's oid (a new one when created again), its primary key constraint, and its columns.
       const rows = await query(
-        `SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind
+        `SELECT n.nspname AS schema, c.relname AS name, c.relkind AS kind,
+                concat_ws(':', c.oid,
+                  (SELECT k.oid FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'),
+                  (SELECT hashtext(string_agg(a.attname || ' ' || a.atttypid, ',' ORDER BY a.attnum)) FROM pg_attribute a
+                    WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped)) AS version
            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
           WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relpersistence <> 't'
             AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_toast%'
             AND has_table_privilege(c.oid, 'SELECT')
           ORDER BY 1, 2`,
       );
+      partitioned.clear();
       return rows.map((r) => {
         const t = { schema: String(r.schema), name: String(r.name) };
         if (r.kind === "p") partitioned.add(name(t));
-        return t;
+        return { ...t, version: String(r.version) };
       });
     },
     async primaryKey(t) {

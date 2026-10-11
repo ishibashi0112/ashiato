@@ -18,6 +18,8 @@ interface Writer {
   close: () => Promise<void>;
   /** Creates a user that may only SELECT from these tables and returns a URL that connects as it. */
   readOnlyUrl: (tables: string[]) => Promise<string>;
+  /** Lets that user SELECT from a table created later (as SELECT on the whole schema would). */
+  grant: (table: string) => Promise<void>;
 }
 
 interface Dialect {
@@ -27,6 +29,8 @@ interface Dialect {
   dec: string;
   /** Literal for 2026-10-11 10:00:00.000100. */
   ts: string;
+  /** Literal for the DATE 2026-10-11. */
+  date: string;
   /** Adds one microsecond to the ts column, or undefined when the adapter keeps only milliseconds. */
   addMicrosecond?: string;
   /** Inserts rows 1..n into a table with columns (id, qty, note): qty = id % 10, note = NOTE. */
@@ -53,6 +57,7 @@ const dialects: Record<string, Dialect> = {
     types: { big: "BIGINT", ts: "TIMESTAMP(6)", doc: "JSONB" },
     dec: "NUMERIC(38, 18)",
     ts: "'2026-10-11 10:00:00.0001'",
+    date: "'2026-10-11'",
     addMicrosecond: "ts + interval '1 microsecond'",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT g, g % 10, '${NOTE}' FROM generate_series(1, ${n}) g`,
     async writer(url) {
@@ -72,6 +77,7 @@ const dialects: Record<string, Dialect> = {
           await run(`GRANT SELECT ON ${tables.join(", ")} TO ${RO}`);
           return withUser(url, RO, RO);
         },
+        grant: (t) => run(`GRANT SELECT ON ${t} TO ${RO}`),
       };
     },
   },
@@ -79,6 +85,7 @@ const dialects: Record<string, Dialect> = {
     types: { big: "BIGINT", ts: "DATETIME(6)", doc: "JSON" },
     dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.000100'",
+    date: "'2026-10-11'",
     addMicrosecond: "ts + INTERVAL 1 MICROSECOND",
     // a recursive CTE stops at 1000 rows by default (cte_max_recursion_depth): cross join digits instead
     fill: (t, n) => {
@@ -100,6 +107,7 @@ const dialects: Record<string, Dialect> = {
           for (const t of tables) await run(`GRANT SELECT ON \`${db}\`.\`${t}\` TO '${RO}'@'%'`);
           return withUser(url, RO, RO);
         },
+        grant: (t) => run(`GRANT SELECT ON \`${db}\`.\`${t}\` TO '${RO}'@'%'`),
       };
     },
   },
@@ -107,6 +115,7 @@ const dialects: Record<string, Dialect> = {
     types: { big: "BIGINT", ts: "DATETIME2(7)", doc: "NVARCHAR(200)" },
     dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.0001000'",
+    date: "'2026-10-11'",
     addMicrosecond: "DATEADD(microsecond, 1, ts)",
     fill: (t, n) =>
       `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (SELECT TOP (${n}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b) s`,
@@ -135,6 +144,7 @@ const dialects: Record<string, Dialect> = {
           for (const t of tables) await run(`GRANT SELECT ON ${t} TO ${RO}`);
           return withUser(url, RO, password);
         },
+        grant: (t) => run(`GRANT SELECT ON ${t} TO ${RO}`),
       };
     },
   },
@@ -142,6 +152,7 @@ const dialects: Record<string, Dialect> = {
     types: { big: "NUMBER(19)", ts: "TIMESTAMP(6)", doc: "VARCHAR2(200)" },
     dec: "NUMBER(38, 18)",
     ts: "TIMESTAMP '2026-10-11 10:00:00.000100'",
+    date: "DATE '2026-10-11'",
     addMicrosecond: "ts + NUMTODSINTERVAL(0.000001, 'SECOND')",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT LEVEL, MOD(LEVEL, 10), '${NOTE}' FROM dual CONNECT BY LEVEL <= ${n}`,
     async writer(url) {
@@ -157,12 +168,14 @@ const dialects: Record<string, Dialect> = {
       const c = await open(url);
       const run = async (sql: string) => void (await c.execute(sql, [], { autoCommit: true }));
       const owner = decodeURIComponent(new URL(url).username).toUpperCase();
+      let separateUser = false;
       return {
         run,
         close: () => c.close(),
         async readOnlyUrl(tables) {
           const adminUrl = process.env.ASHIATO_TEST_ORACLE_ADMIN_URL;
           if (!adminUrl) return url;
+          separateUser = true;
           const admin = await open(adminUrl);
           try {
             await admin.execute(`BEGIN EXECUTE IMMEDIATE 'DROP USER ${RO} CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;`);
@@ -173,6 +186,9 @@ const dialects: Record<string, Dialect> = {
           }
           for (const t of tables) await run(`GRANT SELECT ON ${t} TO ${RO}`);
           return withUser(url, RO, RO, { schema: owner });
+        },
+        grant: async (t) => {
+          if (separateUser) await run(`GRANT SELECT ON ${t} TO ${RO}`);
         },
       };
     },
@@ -254,6 +270,9 @@ for (const [dialect, d] of Object.entries(dialects)) {
       await w.run(`CREATE TABLE ${log} (msg VARCHAR(20))`);
       await w.run(d.fill(t, 2000));
       const db = await connect(await w.readOnlyUrl([t, log]));
+      // Oracle and MySQL keep the time of the last DDL in whole seconds, so a table is read in full at
+      // each checkpoint until that second is surely over
+      if (dialect === "oracle" || dialect === "mysql") await new Promise((r) => setTimeout(r, 2000));
       const read = db.readBuckets!.bind(db);
       const reads: { which?: number[]; rows: number }[] = [];
       db.readBuckets = async (table, key, n, which) => {
@@ -308,6 +327,122 @@ for (const [dialect, d] of Object.entries(dialects)) {
       } finally {
         await db.close();
         for (const x of [t, log]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
+        await w.close();
+      }
+    }, 60_000);
+
+    it("watches tables created, altered or created again while recording", async () => {
+      const w = await d.writer(url!);
+      const [a, t] = ["ashiato_a", "ashiato_new"];
+      for (const x of [a, t]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
+      await w.run(`CREATE TABLE ${a} (id INT PRIMARY KEY)`);
+      const db = await connect(await w.readOnlyUrl([a]));
+      // (SQL Server's master database lets everyone read a few spt_ tables)
+      const named = (x: { name: string }[] | undefined) => x?.map((r) => r.name.toLowerCase()).filter((n) => n.startsWith("ashiato_"));
+      const plain = (r: Row | undefined) => {
+        const { id, qty, note } = lower(r);
+        return { id: Number(id), qty: Number(qty), note };
+      };
+      const byId = <T>(rows: T[], row: (x: T) => Row) => [...rows].sort((x, y) => plain(row(x)).id - plain(row(y)).id);
+      try {
+        // all the tables the user can read, so tables created later are watched too
+        const recorder = new Recorder(db);
+        const session = await recorder.start();
+        expect(named(session.tables)).toEqual([a]);
+
+        // a date and a long decimal: SQL Server and Oracle then read the table with a column list
+        await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT, day DATE, amount ${d.dec})`);
+        await w.run(`INSERT INTO ${t} (id, qty, day, amount) VALUES (1, 1, ${d.date}, 1.5)`);
+        await w.run(`INSERT INTO ${t} (id, qty, day, amount) VALUES (2, 2, ${d.date}, 2.5)`);
+        await w.grant(t);
+        const created = await recorder.checkpoint("create");
+        expect(named(created.addedTables)).toEqual([t]);
+        expect(created.diff.tables.map((x) => byId(x.inserted, (r) => r).map(plain))).toEqual([
+          [
+            { id: 1, qty: 1, note: undefined },
+            { id: 2, qty: 2, note: undefined },
+          ],
+        ]);
+        expect(named(recorder.session.tables)).toEqual([a, t]);
+
+        // the new column is in the reads, and rows where it is NULL didn't change
+        await w.run(`ALTER TABLE ${t} ADD note VARCHAR(20)`);
+        await w.run(`UPDATE ${t} SET note = 'rush' WHERE id = 2`);
+        const altered = await recorder.checkpoint("alter");
+        expect(altered.diff.tables).toHaveLength(1);
+        expect(altered.diff.tables[0]!.updated.map((u) => [plain(u.after), u.changed.map((c) => c.toLowerCase())])).toEqual([
+          [{ id: 2, qty: 2, note: "rush" }, ["note"]],
+        ]);
+        // and in the row hash (MySQL): a change to it alone is seen
+        await w.run(`UPDATE ${t} SET note = 'later' WHERE id = 1`);
+        const later = await recorder.checkpoint("later");
+        expect(later.diff.tables.map((x) => x.updated.map((u) => [plain(u.after), u.changed.map((c) => c.toLowerCase())]))).toEqual([
+          [[{ id: 1, qty: 1, note: "later" }, ["note"]]],
+        ]);
+
+        // created again with other columns: nothing read with the old column list
+        await w.run(`DROP TABLE ${t}`);
+        await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT, note VARCHAR(20))`);
+        await w.run(`INSERT INTO ${t} (id, qty, note) VALUES (1, 1, 'later')`);
+        await w.run(`INSERT INTO ${t} (id, qty, note) VALUES (2, 20, 'rush')`);
+        await w.grant(t);
+        const recreated = await recorder.checkpoint("create again");
+        expect(recreated.skipped).toBeUndefined();
+        expect(recreated.addedTables).toBeUndefined();
+        const changed = byId(recreated.diff.tables[0]!.updated, (u) => u.after).map((u) => [
+          plain(u.after),
+          u.changed.map((c) => c.toLowerCase()).sort(),
+        ]);
+        expect(changed).toEqual([
+          [{ id: 1, qty: 1, note: "later" }, ["amount", "day"]],
+          [{ id: 2, qty: 20, note: "rush" }, ["amount", "day", "qty"]],
+        ]);
+        expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
+
+        await w.run(`DROP TABLE ${t}`);
+        const dropped = await recorder.checkpoint("drop");
+        expect(named(dropped.removedTables)).toEqual([t]);
+        expect(dropped.diff.tables).toEqual([]);
+        expect(dropped.skipped).toBeUndefined();
+        expect(named(recorder.session.tables)).toEqual([a]);
+      } finally {
+        await db.close();
+        for (const x of [a, t]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
+        await w.close();
+      }
+    }, 60_000);
+
+    it("changes a table's version when it is altered or created again, and only then", async () => {
+      const w = await d.writer(url!);
+      const t = "ashiato_ver";
+      await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+      await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT)`);
+      const db = await connect(await w.readOnlyUrl([t]));
+      // Oracle and MySQL keep the time of the last DDL in whole seconds: their versions settle once that second is over
+      const settle = () => new Promise((r) => setTimeout(r, dialect === "oracle" || dialect === "mysql" ? 2100 : 0));
+      const version = async () => (await db.listTables()).find((x) => x.name.toLowerCase() === t)?.version;
+      try {
+        await settle();
+        const created = await version();
+        expect(created).toBeTruthy();
+        await w.run(`INSERT INTO ${t} (id, qty) VALUES (1, 1)`);
+        await w.run(`UPDATE ${t} SET qty = 2`);
+        expect(await version()).toBe(created);
+
+        await w.run(`ALTER TABLE ${t} ADD note VARCHAR(20)`);
+        await settle();
+        const altered = await version();
+        expect(altered).not.toBe(created);
+        expect(await version()).toBe(altered);
+
+        await w.run(`DROP TABLE ${t}`);
+        await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT, note VARCHAR(20))`);
+        await w.grant(t);
+        await settle();
+        expect(await version()).not.toBe(altered);
+      } finally {
+        await db.close();
+        await w.run(`DROP TABLE ${t}`).catch(() => undefined);
         await w.close();
       }
     }, 60_000);
