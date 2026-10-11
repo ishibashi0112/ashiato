@@ -312,8 +312,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     const restarted = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), recorder.session);
     serverOptions.media = restarted;
     try {
-      // any change to the page sends a batch, and the reply asks for a snapshot
-      await page.getByRole("button", { name: "詳細タブ" }).click();
+      // the page is idle: it still checks in, and the reply asks for a snapshot
       const snapshots = () => {
         const file = restarted.replayPath();
         if (!file) return 0;

@@ -13,6 +13,8 @@ type Post = (body: string, final: boolean) => Promise<{ snapshot?: boolean } | u
 
 const FLUSH_MS = 1000;
 const FLUSH_EVENTS = 500;
+/** An idle page still checks in this often, so a recorder started meanwhile gets its full snapshot before the next action. */
+const HEARTBEAT_MS = 5000;
 /** Full snapshots the recorder asks for are taken at most this often at first, then less and less often while it keeps asking. */
 const SNAPSHOT_GAP_MS = 10_000;
 const MAX_SNAPSHOT_GAP_MS = 10 * 60_000;
@@ -39,10 +41,12 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
     gap = Math.min(gap * 2, MAX_SNAPSHOT_GAP_MS);
     record.takeFullSnapshot();
   };
+  let lastPost = 0;
   const flush = (final = false) => {
-    if (buffer.length === 0) return;
+    if (buffer.length === 0 && (final || Date.now() - lastPost < HEARTBEAT_MS)) return;
     const body = JSON.stringify({ tab, events: buffer });
     buffer = [];
+    lastPost = Date.now();
     const batch = sent++;
     void post(body, final).then((reply) => onReply(batch, reply), () => undefined);
   };
