@@ -18,11 +18,23 @@ export function diffSnapshots(before: Snapshot, after: Snapshot, options: DiffOp
   for (const a of after.tables) {
     const b = beforeById.get(tableId(a.table));
     if (!b || a.skipped || b.skipped) continue;
-    const d = a.key.length > 0 && uniqueKeys(b) && uniqueKeys(a) ? diffByKey(b, a, ignore) : diffAsMultiset(b, a, ignore);
+    const [bs, as] = changedParts(b, a);
+    const d = as.key.length > 0 && uniqueKeys(bs) && uniqueKeys(as) ? diffByKey(bs, as, ignore) : diffAsMultiset(bs, as, ignore);
     if (d.inserted.length || d.deleted.length || d.updated.length) tables.push(d);
   }
 
   return { from: before.takenAt, to: after.takenAt, tables };
+}
+
+/**
+ * When the newer snapshot re-read only some buckets, the others are unchanged: compare just the
+ * rows of the re-read buckets. A row stays in its bucket (or changes both), so nothing else is needed.
+ */
+function changedParts(b: TableSnapshot, a: TableSnapshot): [TableSnapshot, TableSnapshot] {
+  const changed = a.buckets?.changed;
+  if (!changed || b.buckets?.count !== a.buckets!.count) return [b, a];
+  const part = (t: TableSnapshot): TableSnapshot => ({ ...t, rows: [...changed].flatMap((x) => t.buckets!.rows.get(x) ?? []) });
+  return [part(b), part(a)];
 }
 
 /**

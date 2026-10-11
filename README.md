@@ -79,6 +79,22 @@ Select a step in the timeline and the **Screen** panel shows what the screen loo
 - **Video (any app):** press **● Record screen** in the timeline and pick a window or the whole screen. This works for anything on your desktop, such as a WinForms / WPF app with WebView2, not only the browser. The video is uploaded to the recorder every second, and each step jumps to its moment in the video.
 - Both stay on your machine, next to the session file: `<session>.replay.ndjson` and `<session>.video-<n>.webm`. `ashiato show` replays them too.
 
+## Large tables
+
+Only the first snapshot reads every row. After that, the database splits each table into buckets of about 256 rows and returns a row count and a checksum per bucket. Only buckets whose checksum changed are read again, so a checkpoint where nothing changed transfers almost nothing. It is all plain `SELECT`s: no setting changes, no extra permissions.
+
+| Database | Checksum of a row | Buckets |
+| --- | --- | --- |
+| PostgreSQL | `xmin` (changes on every insert and update) | hash of the primary key |
+| SQL Server | the table's `rowversion` column if it has one, otherwise SHA-256 of the row as JSON (SQL Server 2016 or later) | `CHECKSUM` of the primary key |
+| Oracle | `ORA_ROWSCN` (kept per data block) | data block, so a change also re-reads the rows sharing its block |
+| MySQL / MariaDB | MD5 of the row's values | CRC32 of the primary key |
+| SQLite | — (a local file: read in full) | |
+
+A table without a primary key is a single bucket: it is read again only when something in it changed. When a table can't be read this way (for example a SQL Server column type that `FOR JSON` can't serialize), the recorder says so at start and reads that table in full. `--full-read` turns incremental reads off.
+
+Rows are kept in memory, so `--max-rows` still applies.
+
 ## Connection URLs
 
 | Database | URL | Driver |
@@ -87,7 +103,7 @@ Select a step in the timeline and the **Screen** panel shows what the screen loo
 | Oracle | `oracle://user:pass@host:1521/service?schema=OWNER` | `oracledb` (Thin mode, no Instant Client) |
 | PostgreSQL | `postgres://user:pass@host:5432/db` | `pg` |
 | MySQL / MariaDB | `mysql://user:pass@host:3306/db` | `mysql2` |
-| SQLite | `sqlite:./dev.db` | built in (Node.js 22.5+) |
+| SQLite | `sqlite:./dev.db` | built in (Node.js 22.13+; 22.5–22.12 need `--experimental-sqlite`) |
 
 The URL can also come from the `ASHIATO_DB_URL` environment variable.
 
@@ -98,6 +114,7 @@ The URL can also come from the `ASHIATO_DB_URL` environment variable.
 | `--tables a,b` | Tables to watch (default: all). `name` or `schema.name`, case-insensitive |
 | `--ignore-columns updated_at` | Columns ignored when detecting updates |
 | `--max-rows 100000` | Tables larger than this are skipped (reported, not read) |
+| `--full-read` | Read every row at each checkpoint, not only the parts that changed |
 | `--out .ashiato/sessions` | Where sessions are saved |
 | `--port 4100` | Timeline UI port |
 | `--no-ui` | Terminal only |
@@ -123,16 +140,15 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 - Changes are compared between checkpoints, so a row changed twice between two checkpoints shows only the final result.
 - On a shared development database, other people's changes during the same moment are included.
 - Tables without a primary key are compared row by row, so an update appears as a delete plus an insert.
-- Each checkpoint reads the watched tables in full. Use `--tables` to keep it fast; large tables are skipped above `--max-rows`. A step lists any table it could not compare (too large, or unreadable).
+- The first snapshot reads the watched tables in full and keeps them in memory; later checkpoints re-read only what changed (see [Large tables](#large-tables)). Tables above `--max-rows` are skipped. A step lists any table it could not compare (too large, or unreadable).
 - Tables are chosen when recording starts; tables created later are not watched.
-- Oracle `TIMESTAMP` values are compared to the millisecond.
 
 ## Roadmap
 
 1. ✅ Read-only snapshot diff, all major databases, CLI, timeline UI
 2. ✅ Vite plugin: checkpoint automatically around each user action (fetch / XHR / WebView2 `postMessage`)
 3. ✅ Screen replay (rrweb) and screen recording synced with the timeline
-4. Faster diffs for large tables (range hashing, `rowversion` / `ORA_ROWSCN`)
+4. ✅ Faster checkpoints for large tables: re-read only the buckets whose checksum changed (`xmin`, `rowversion`, `ORA_ROWSCN`, row hashes)
 5. Evidence export (Excel / PDF)
 6. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
 
@@ -192,21 +208,36 @@ export default defineConfig({
 - **録画(どのアプリでも)**:タイムラインの **● Record screen** を押し、ウィンドウか画面全体を選びます。ブラウザに限らず、WebView2 を使った WinForms / WPF アプリなどデスクトップ上の何でも録画できます。動画は1秒ごとにレコーダーへ送られ、各ステップは動画内のその時刻に移動します
 - どちらもセッションファイルの隣(`<session>.replay.ndjson`、`<session>.video-<n>.webm`)に保存され、外部には送られません。`ashiato show` でも再生できます
 
+### 大きなテーブル
+
+全件を読むのは最初のスナップショットだけです。以降は、DB側で各テーブルを約256行ずつのバケットに分け、バケットごとの行数とチェックサムを返します。チェックサムが変わったバケットだけを読み直すので、何も変わっていないチェックポイントではほとんど通信しません。使うのは通常の `SELECT` だけで、設定変更も追加の権限も不要です。
+
+| DB | 行のチェックサム | バケットの分け方 |
+| --- | --- | --- |
+| PostgreSQL | `xmin`(追加・更新のたびに変わる) | 主キーのハッシュ |
+| SQL Server | テーブルに `rowversion` 列があればその値、なければ行をJSONにしたSHA-256(SQL Server 2016以降) | 主キーの `CHECKSUM` |
+| Oracle | `ORA_ROWSCN`(データブロック単位) | データブロック単位。変更があると同じブロックの行も読み直します |
+| MySQL / MariaDB | 行の値のMD5 | 主キーのCRC32 |
+| SQLite | なし(ローカルファイルなので全件読みます) | |
+
+主キーのないテーブルは1つのバケットとして扱い、中身が変わったときだけ読み直します。この方法で読めないテーブル(`FOR JSON` で扱えない列型を持つSQL Serverのテーブルなど)は、記録開始時にその旨を表示して全件読みます。`--full-read` を付けると、この仕組みを使わずに毎回全件読みます。
+
+行はメモリに保持するので、`--max-rows` の上限はそのまま有効です。
+
 ### 参照専用スナップショットの制限
 
 - チェックポイント間の比較なので、その間に同じ行が2回変わった場合は最終結果だけが見えます
 - 共有の開発DBでは、同じ時間帯に他の人が行った変更も含まれます
 - 主キーのないテーブルは行全体で比較するため、更新は「削除+追加」として表示されます
-- チェックポイントのたびに対象テーブルを全件読みます。`--tables` で対象を絞ってください。`--max-rows` を超えるテーブルはスキップし、比較できなかったテーブル(大きすぎる・読めない)は各ステップに表示します
+- 最初のスナップショットで対象テーブルを全件読んでメモリに保持し、以降は変わった部分だけを読み直します(「大きなテーブル」参照)。`--max-rows` を超えるテーブルはスキップし、比較できなかったテーブル(大きすぎる・読めない)は各ステップに表示します
 - 対象テーブルは記録開始時に決まります。開始後に作られたテーブルは対象外です
-- Oracle の `TIMESTAMP` はミリ秒単位で比較します
 
 ### ロードマップ
 
 1. ✅ 参照専用スナップショット差分・主要DB対応・CLI・タイムライン画面
 2. ✅ Viteプラグイン:操作ごとに自動でチェックポイント(fetch / XHR / WebView2 `postMessage`)
 3. ✅ タイムラインと同期した画面リプレイ(rrweb)・画面録画
-4. 大きなテーブル向けの高速化(範囲ハッシュ比較、`rowversion` / `ORA_ROWSCN`)
+4. ✅ 大きなテーブル向けの高速化:チェックサムが変わったバケットだけを読み直す(`xmin`・`rowversion`・`ORA_ROWSCN`・行ハッシュ)
 5. テスト証跡の出力(Excel / PDF)
 6. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー
 

@@ -23,12 +23,20 @@ interface Writer {
 interface Dialect {
   /** Column types for: a 64-bit integer, a timestamp with sub-millisecond precision, a JSON document. */
   types: { big: string; ts: string; doc: string };
+  /** A decimal with more digits than a float holds. */
+  dec: string;
   /** Literal for 2026-10-11 10:00:00.000100. */
   ts: string;
   /** Adds one microsecond to the ts column, or undefined when the adapter keeps only milliseconds. */
   addMicrosecond?: string;
+  /** Inserts rows 1..n into a table with columns (id, qty, note): qty = id % 10, note = NOTE. */
+  fill: (table: string, n: number) => string;
+  /** An extra column for the large table, to cover the adapter's other signature (SQL Server rowversion). */
+  extraColumn?: string;
   writer: (url: string) => Promise<Writer>;
 }
+
+const NOTE = "x".repeat(100);
 
 const RO = "ashiato_ro";
 
@@ -43,8 +51,10 @@ const withUser = (url: string, user: string, password: string, params: Record<st
 const dialects: Record<string, Dialect> = {
   postgres: {
     types: { big: "BIGINT", ts: "TIMESTAMP(6)", doc: "JSONB" },
+    dec: "NUMERIC(38, 18)",
     ts: "'2026-10-11 10:00:00.0001'",
     addMicrosecond: "ts + interval '1 microsecond'",
+    fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT g, g % 10, '${NOTE}' FROM generate_series(1, ${n}) g`,
     async writer(url) {
       const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
       const c = new pg.Client({ connectionString: url });
@@ -67,8 +77,15 @@ const dialects: Record<string, Dialect> = {
   },
   mysql: {
     types: { big: "BIGINT", ts: "DATETIME(6)", doc: "JSON" },
+    dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.000100'",
     addMicrosecond: "ts + INTERVAL 1 MICROSECOND",
+    // a recursive CTE stops at 1000 rows by default (cte_max_recursion_depth): cross join digits instead
+    fill: (t, n) => {
+      const digit = "(SELECT 0 AS i UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9)";
+      const nums = `SELECT a.i + 10 * b.i + 100 * c.i + 1000 * d.i + 1 AS i FROM ${digit} a, ${digit} b, ${digit} c, ${digit} d`;
+      return `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (${nums}) s WHERE i <= ${n}`;
+    },
     async writer(url) {
       const mysql = await loadDriver<typeof import("mysql2/promise")>("mysql2/promise", "MySQL");
       const c = await mysql.createConnection({ uri: url });
@@ -88,8 +105,12 @@ const dialects: Record<string, Dialect> = {
   },
   mssql: {
     types: { big: "BIGINT", ts: "DATETIME2(7)", doc: "NVARCHAR(200)" },
+    dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.0001000'",
     addMicrosecond: "DATEADD(microsecond, 1, ts)",
+    fill: (t, n) =>
+      `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (SELECT TOP (${n}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b) s`,
+    extraColumn: "rv ROWVERSION",
     async writer(url) {
       const mssql = await loadDriver<typeof import("mssql")>("mssql", "SQL Server");
       const u = new URL(url);
@@ -119,9 +140,10 @@ const dialects: Record<string, Dialect> = {
   },
   oracle: {
     types: { big: "NUMBER(19)", ts: "TIMESTAMP(6)", doc: "VARCHAR2(200)" },
+    dec: "NUMBER(38, 18)",
     ts: "TIMESTAMP '2026-10-11 10:00:00.000100'",
-    // DATE / TIMESTAMP are read through the driver's Date: milliseconds only
-    addMicrosecond: undefined,
+    addMicrosecond: "ts + NUMTODSINTERVAL(0.000001, 'SECOND')",
+    fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT LEVEL, MOD(LEVEL, 10), '${NOTE}' FROM dual CONNECT BY LEVEL <= ${n}`,
     async writer(url) {
       const oracledb = await loadDriver<typeof import("oracledb")>("oracledb", "Oracle");
       const open = async (connUrl: string) => {
@@ -167,13 +189,19 @@ for (const [dialect, d] of Object.entries(dialects)) {
       const tables = ["ashiato_orders", "ashiato_stock"];
       for (const t of tables) await w.run(`DROP TABLE ${t}`).catch(() => undefined);
       await w.run("CREATE TABLE ashiato_orders (id INT PRIMARY KEY, qty INT, note VARCHAR(20))");
-      await w.run(`CREATE TABLE ashiato_stock (item_id INT PRIMARY KEY, qty INT, big ${d.types.big}, ts ${d.types.ts}, doc ${d.types.doc})`);
-      await w.run(`INSERT INTO ashiato_stock (item_id, qty, big, ts, doc) VALUES (3, 50, 9007199254740993, ${d.ts}, '[{"qty":1},{"qty":2}]')`);
+      await w.run(
+        `CREATE TABLE ashiato_stock (item_id INT PRIMARY KEY, qty INT, big ${d.types.big}, ts ${d.types.ts}, doc ${d.types.doc}, amount ${d.dec})`,
+      );
+      await w.run(
+        `INSERT INTO ashiato_stock (item_id, qty, big, ts, doc, amount) VALUES (3, 50, 9007199254740993, ${d.ts}, '[{"qty":1},{"qty":2}]', 1.000000000000000001)`,
+      );
 
       const db = await connect(await w.readOnlyUrl(tables));
       try {
         const recorder = new Recorder(db, { tables });
         await recorder.start();
+        // every column type here can be read incrementally
+        expect(recorder.fullReadTables()).toEqual([]);
         // primary keys must be visible to a user that can only SELECT
         expect(await db.primaryKey(recorder.session.tables.find((t) => /orders/i.test(t.name))!)).toEqual([
           expect.stringMatching(/^id$/i),
@@ -190,12 +218,12 @@ for (const [dialect, d] of Object.entries(dialects)) {
         expect(lower(stock?.updated[0]?.after)).toMatchObject({ qty: 40, big: "9007199254740993" });
 
         // values a float or a millisecond Date would lose
-        await w.run(`UPDATE ashiato_stock SET big = 9007199254740995, doc = '[{"qty":1},{"qty":3}]'`);
+        await w.run(`UPDATE ashiato_stock SET big = 9007199254740995, doc = '[{"qty":1},{"qty":3}]', amount = 1.000000000000000002`);
         if (d.addMicrosecond) await w.run(`UPDATE ashiato_stock SET ts = ${d.addMicrosecond}`);
         const exact = await recorder.checkpoint("exact");
         const changed = exact.diff.tables[0]?.updated[0]?.changed.map((c) => c.toLowerCase()).sort();
-        expect(changed).toEqual(d.addMicrosecond ? ["big", "doc", "ts"] : ["big", "doc"]);
-        expect(lower(exact.diff.tables[0]?.updated[0]?.after).big).toBe("9007199254740995");
+        expect(changed).toEqual(d.addMicrosecond ? ["amount", "big", "doc", "ts"] : ["amount", "big", "doc"]);
+        expect(lower(exact.diff.tables[0]?.updated[0]?.after)).toMatchObject({ big: "9007199254740995", amount: "1.000000000000000002" });
 
         // nothing changed: nothing reported
         expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
@@ -208,6 +236,73 @@ for (const [dialect, d] of Object.entries(dialects)) {
       } finally {
         await db.close();
         for (const t of tables) await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+        await w.close();
+      }
+    }, 60_000);
+
+    it("re-reads only the part of a large table that changed", async () => {
+      const w = await d.writer(url!);
+      const t = "ashiato_big";
+      const log = "ashiato_log"; // no primary key, empty at first: one bucket, no GROUP BY
+      for (const x of [t, log]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
+      await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT, note VARCHAR(100)${d.extraColumn ? `, ${d.extraColumn}` : ""})`);
+      await w.run(`CREATE TABLE ${log} (msg VARCHAR(20))`);
+      await w.run(d.fill(t, 2000));
+      const db = await connect(await w.readOnlyUrl([t, log]));
+      const read = db.readBuckets!.bind(db);
+      const reads: { which?: number[]; rows: number }[] = [];
+      db.readBuckets = async (table, key, n, which) => {
+        const rows = await read(table, key, n, which);
+        reads.push({ which, rows: rows.length });
+        return rows;
+      };
+      const plain = (r: Row | undefined) => {
+        const { id, qty, note } = lower(r);
+        return { id: Number(id), qty: Number(qty), note };
+      };
+      try {
+        const recorder = new Recorder(db, { tables: [t, log], rowsPerBucket: 20 });
+        await recorder.start();
+        expect(recorder.fullReadTables()).toEqual([]);
+        expect(reads).toEqual([
+          { which: undefined, rows: 2000 },
+          { which: undefined, rows: 0 },
+        ]);
+
+        // the database's sums match the ones computed from the rows read: nothing is read again
+        reads.length = 0;
+        expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
+        expect(reads).toEqual([]);
+
+        await w.run(`INSERT INTO ${log} (msg) VALUES ('saved')`);
+        const logged = await recorder.checkpoint("log");
+        expect(logged.diff.tables.map((x) => x.inserted.map(lower))).toEqual([[{ msg: "saved" }]]);
+
+        reads.length = 0;
+        await w.run(`UPDATE ${t} SET qty = 99 WHERE id = 1234`);
+        const upd = await recorder.checkpoint("update");
+        expect(upd.diff.tables).toHaveLength(1);
+        expect(upd.diff.tables[0]!.updated.map((u) => [plain(u.before), plain(u.after)])).toEqual([
+          [{ id: 1234, qty: 4, note: NOTE }, { id: 1234, qty: 99, note: NOTE }],
+        ]);
+        expect(reads).toHaveLength(1);
+        expect(reads[0]!.rows).toBeLessThan(1000);
+
+        reads.length = 0;
+        await w.run(`INSERT INTO ${t} (id, qty, note) VALUES (5000, 1, 'new')`);
+        await w.run(`DELETE FROM ${t} WHERE id = 10`);
+        await w.run(`UPDATE ${t} SET id = 6000 WHERE id = 20`);
+        const mixed = (await recorder.checkpoint("mixed")).diff.tables[0]!;
+        expect(mixed.inserted.map(plain).map((r) => r.id).sort()).toEqual([5000, 6000]);
+        expect(mixed.deleted.map(plain).map((r) => r.id).sort()).toEqual([10, 20]);
+        expect(reads[0]!.rows).toBeLessThan(2000);
+
+        reads.length = 0;
+        expect((await recorder.checkpoint("idle again")).diff.tables).toEqual([]);
+        expect(reads).toEqual([]);
+      } finally {
+        await db.close();
+        for (const x of [t, log]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
         await w.close();
       }
     }, 60_000);

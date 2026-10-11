@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { diffSnapshots } from "../src/core/diff.js";
-import { normalizeValue } from "../src/core/normalize.js";
+import { exactDecimal, normalizeValue } from "../src/core/normalize.js";
 import type { Snapshot } from "../src/core/types.js";
 
 const snap = (rows: Record<string, unknown>[], key = ["id"], at = "t"): Snapshot => ({
@@ -90,6 +90,8 @@ describe("normalizeValue", () => {
     expect(normalizeValue(new Date("2026-10-11T00:00:00Z"))).toBe("2026-10-11T00:00:00.000Z");
     expect(normalizeValue(Buffer.from([1, 255]))).toBe("0x01ff");
     expect(normalizeValue({ toString: () => "12.50" })).toBe("12.50");
+    // a JSON document (mysql2, oracledb) whose keys happen to be named like methods
+    expect(normalizeValue({ toString: "x", toJSON: 1 })).toBe('{"toString":"x","toJSON":1}');
     expect(normalizeValue({ a: 1 })).toBe('{"a":1}');
   });
 
@@ -110,5 +112,17 @@ describe("normalizeValue", () => {
   it("keeps SQL Server's sub-millisecond digits", () => {
     const d = Object.assign(new Date("2026-10-11T10:00:00.123Z"), { nanosecondsDelta: 0.0004567 });
     expect(normalizeValue(d)).toBe("2026-10-11T10:00:00.1234567Z");
+  });
+
+  it("keeps decimals read as text exact, and plain numbers where that is exact", () => {
+    expect(exactDecimal("1.000000000000000001")).toBe("1.000000000000000001");
+    expect(exactDecimal("1.500000000000000000")).toBe(1.5);
+    expect(exactDecimal("123456789012345.6789")).toBe("123456789012345.6789");
+    expect(exactDecimal("12345678901234567890")).toBe("12345678901234567890");
+    expect(exactDecimal("100.0000")).toBe(100);
+    expect(exactDecimal(".5")).toBe(0.5);
+    expect(exactDecimal("-.25")).toBe(-0.25);
+    expect(exactDecimal("-0.0000")).toBe(0);
+    expect(exactDecimal(null)).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
+import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -9,9 +10,10 @@ const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
 /**
  * Types read as the server's text instead of being parsed: dates and times (pg's Date drops
  * microseconds and shifts DATE / TIMESTAMP by the local time zone), intervals, and JSON.
- * date, time, timestamp, timestamptz, timetz, interval, json, jsonb, and their arrays.
+ * date, time, timestamp, timestamptz, timetz, interval, json, jsonb, and their arrays; numeric[]
+ * (pg parses it as floats, while plain numeric already stays text).
  */
-const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807]);
+const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807, 1231]);
 
 export async function connectPostgres(url: URL): Promise<DbAdapter> {
   const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
@@ -34,6 +36,14 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
   // rows of inheriting child tables aren't counted twice. Filled by listTables (the recorder calls it first).
   const partitioned = new Set<string>();
   const from = (t: TableRef) => (partitioned.has(name(t)) ? name(t) : `ONLY ${name(t)}`);
+
+  // Buckets: a hash of the key. Signature: xmin, the id of the transaction that wrote the row
+  // version. Every insert and update writes a new row version with a newer id.
+  const bucketOf = (key: string[], n: number) => {
+    if (key.length === 0 || n <= 1) return "0";
+    const k = key.length === 1 ? `${ALIAS}.${q(key[0]!)}::text` : `row(${key.map((c) => `${ALIAS}.${q(c)}`).join(", ")})::text`;
+    return `((hashtext(${k}) % ${n}) + ${n}) % ${n}`;
+  };
 
   return {
     dialect: "postgres",
@@ -70,6 +80,19 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
     },
     async readRows(t): Promise<Row[]> {
       return (await query(`SELECT * FROM ${from(t)}`)).map(normalizeRow);
+    },
+    async bucketSums(t, key, n) {
+      const b = bucketOf(key, n);
+      return toSums(
+        await query(`SELECT ${b} AS b, count(*) AS n, sum(${ALIAS}.xmin::text::bigint)::text AS s FROM ${from(t)} AS ${ALIAS}${groupBy(b)}`),
+      );
+    },
+    async readBuckets(t, key, n, which) {
+      const b = bucketOf(key, n);
+      const where = which ? ` WHERE ${b} IN (${bucketList(which)})` : "";
+      return (
+        await query(`SELECT ${b} AS "${BUCKET}", ${ALIAS}.xmin::text AS "${SIG}", ${ALIAS}.* FROM ${from(t)} AS ${ALIAS}${where}`)
+      ).map(toBucketedRow);
     },
     async close() {
       await pool.end();

@@ -1,5 +1,6 @@
-import { normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
+import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -15,19 +16,13 @@ const localText = (d: Date | null, ms: boolean) =>
     : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
       (ms ? `.${pad(d.getMilliseconds(), 3)}` : "");
 
-/** Exact NUMBER values: the driver's float would round large IDs and long decimals. Keeps plain numbers when exact. */
-const exactNumber = (raw: string | null) => {
-  if (raw === null) return null;
-  const s = raw.replace(/^(-?)\./, "$10."); // ".5" → "0.5"
-  const n = Number(s);
-  return String(n) === s ? n : s;
-};
 
 function fetchTypeHandler(oracledb: OracleDb) {
   return (meta: import("oracledb").Metadata<unknown>) => {
     switch (meta.dbType) {
       case oracledb.DB_TYPE_NUMBER:
-        return { type: oracledb.STRING, converter: exactNumber as (v: unknown) => unknown };
+        // exact values: the driver's float would round large IDs and long decimals
+        return { type: oracledb.STRING, converter: exactDecimal as (v: unknown) => unknown };
       case oracledb.DB_TYPE_DATE:
         return { converter: ((d: Date | null) => localText(d, false)) as (v: unknown) => unknown };
       case oracledb.DB_TYPE_TIMESTAMP:
@@ -71,6 +66,44 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
     String((await exec("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS S FROM DUAL"))[0]?.S);
   const name = (t: TableRef) => `${q(t.schema ?? owner)}.${q(t.name)}`;
 
+  // The driver turns DATE / TIMESTAMP into a JavaScript Date: milliseconds only, and shifted around
+  // daylight saving changes. Such columns are read as text formatted by the database instead.
+  const columnLists = new Map<string, Promise<(alias: string) => string>>();
+  const columnsOf = (t: TableRef) => {
+    let c = columnLists.get(name(t));
+    if (!c) {
+      c = exec(
+        `SELECT COLUMN_NAME, DATA_TYPE FROM ALL_TAB_COLUMNS
+          WHERE OWNER = :owner AND TABLE_NAME = :tbl AND COLUMN_ID IS NOT NULL ORDER BY COLUMN_ID`,
+        { owner: t.schema ?? owner, tbl: t.name },
+      ).then((cols) => {
+        const format = (type: string) => {
+          if (type === "DATE") return "YYYY-MM-DD HH24:MI:SS";
+          const m = /^TIMESTAMP\((\d)\)( WITH (LOCAL )?TIME ZONE)?$/.exec(type);
+          if (!m) return undefined;
+          return `YYYY-MM-DD HH24:MI:SS${m[1] === "0" ? "" : `.FF${m[1]}`}${m[2] && !m[3] ? " TZH:TZM" : ""}`;
+        };
+        if (!cols.some((c) => format(String(c.DATA_TYPE)))) return (alias: string) => `${alias}.*`;
+        return (alias: string) =>
+          cols
+            .map((c) => {
+              const col = `${alias}.${q(String(c.COLUMN_NAME))}`;
+              const f = format(String(c.DATA_TYPE));
+              return f ? `TO_CHAR(${col}, '${f}') AS ${q(String(c.COLUMN_NAME))}` : col;
+            })
+            .join(", ");
+      });
+      c.catch(() => columnLists.delete(name(t)));
+      columnLists.set(name(t), c);
+    }
+    return c;
+  };
+  // Signature: ORA_ROWSCN, the SCN of the last change to the row's block (to the row itself only for
+  // tables created with ROWDEPENDENCIES). A change to a block marks all its rows, so buckets group
+  // whole blocks: a hash of the ROWID up to the block number (object, file, block). A row keeps its
+  // ROWID, so it stays in its bucket.
+  const bucketOf = (key: string[], n: number) => (key.length === 0 || n <= 1 ? "0" : `ORA_HASH(SUBSTR(ROWIDTOCHAR(${ALIAS}.ROWID), 1, 15), ${n - 1})`);
+
   return {
     dialect: "oracle",
     async listTables() {
@@ -98,7 +131,20 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
       return Number((await exec(`SELECT COUNT(*) AS N FROM ${name(t)}`))[0]?.N ?? 0);
     },
     async readRows(t): Promise<Row[]> {
-      return (await exec(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
+      const select = await columnsOf(t);
+      return (await exec(`SELECT ${select(ALIAS)} FROM ${name(t)} ${ALIAS}`)).map(normalizeRow);
+    },
+    async bucketSums(t, key, n) {
+      const b = bucketOf(key, n);
+      return toSums(await exec(`SELECT ${b} AS "b", COUNT(*) AS "n", TO_CHAR(SUM(ORA_ROWSCN)) AS "s" FROM ${name(t)} ${ALIAS}${groupBy(b)}`));
+    },
+    async readBuckets(t, key, n, which) {
+      const b = bucketOf(key, n);
+      const select = await columnsOf(t);
+      const where = which ? ` WHERE ${b} IN (${bucketList(which)})` : "";
+      return (await exec(`SELECT ${b} AS "${BUCKET}", TO_CHAR(ORA_ROWSCN) AS "${SIG}", ${select(ALIAS)} FROM ${name(t)} ${ALIAS}${where}`)).map(
+        toBucketedRow,
+      );
     },
     async close() {
       await pool.close(0);
