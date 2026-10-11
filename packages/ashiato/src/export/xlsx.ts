@@ -150,7 +150,7 @@ export class Workbook {
     return sheet;
   }
 
-  toBuffer(): Buffer {
+  toBuffer(): Promise<Buffer> {
     const entries: ZipEntry[] = [];
     const overrides: string[] = [];
     let pictureCount = 0;
@@ -318,12 +318,13 @@ function cellText(s: string): string {
     text
       // `_x0041_` in a cell means "A" to Excel: a literal one keeps its leading underscore by escaping it
       .replace(/_(x[0-9a-fA-F]{4}_)/g, "_x005F_$1")
-      .replace(CONTROL, (c) => `_x${c.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}_`),
+      // XML readers turn a carriage return into a line feed: written escaped, as Excel itself does
+      .replace(/[\x00-\x08\x0b-\x1f]/g, (c) => `_x${c.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}_`),
   );
 }
 
 /** Anything cellText has to change. */
-const SPECIAL = /[&<>"\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]|_x[0-9a-fA-F]{4}_/;
+const SPECIAL = /[&<>"\x00-\x08\x0b-\x1f\ud800-\udfff\ufffe\uffff]|_x[0-9a-fA-F]{4}_/;
 /** Characters XML 1.0 can't contain. */
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
 const NOT_CHARACTER = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]|[\ufffe\uffff]/g;

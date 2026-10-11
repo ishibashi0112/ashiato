@@ -1,4 +1,8 @@
-import { crc32, deflateRawSync } from "node:zlib";
+import { promisify } from "node:util";
+import { crc32, deflateRaw } from "node:zlib";
+
+/** Compresses on libuv's thread pool, so a big workbook doesn't hold up the recorder's server. */
+const deflate = promisify(deflateRaw);
 
 export interface ZipEntry {
   name: string;
@@ -8,7 +12,7 @@ export interface ZipEntry {
 }
 
 /** A plain ZIP archive (no ZIP64), which is all an .xlsx file needs. */
-export function zip(entries: ZipEntry[], date = new Date()): Buffer {
+export async function zip(entries: ZipEntry[], date = new Date()): Promise<Buffer> {
   if (entries.length > 0xffff) throw new Error("too many files for a zip archive");
   const time = (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1);
   const day = ((Math.max(1980, date.getFullYear()) - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
@@ -18,7 +22,7 @@ export function zip(entries: ZipEntry[], date = new Date()): Buffer {
   for (const entry of entries) {
     const name = Buffer.from(entry.name, "utf8");
     const raw = typeof entry.data === "string" ? Buffer.from(entry.data, "utf8") : entry.data;
-    const data = entry.store ? raw : deflateRawSync(raw);
+    const data = entry.store ? raw : await deflate(raw);
     const method = entry.store ? 0 : 8;
     const crc = crc32(raw);
     if (offset + 30 + name.length + data.length > 0xffffffff) throw new Error("the export is too large for a zip archive (4 GB)");

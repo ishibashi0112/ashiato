@@ -68,7 +68,7 @@ export function sampleSession(): Session {
             {
               table: { schema: "dbo", name: "audit_log" },
               key: [],
-              inserted: [{ message: "line1\nline2 \u0001 _x0041_ <tag> & \"q\"" }],
+              inserted: [{ message: "line1\r\nline2 \u0001 _x0041_ <tag> & \"q\"" }],
               deleted: [{ message: "old" }],
               updated: [],
             },

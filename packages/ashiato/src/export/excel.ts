@@ -1,7 +1,7 @@
 import { countChanges, tableId } from "../core/diff.js";
 import type { JsonValue, Step, TableDiff } from "../core/types.js";
-import { columnsOf, keyText, type Evidence, type Screenshot } from "./evidence.js";
-import { actionText, localTime, requestText, stepLabel, TEXT, valueText, zoneOf, type Text } from "./text.js";
+import { columnsOf, keyText, type Evidence } from "./evidence.js";
+import { actionText, localTime, requestText, screenCaption, stepLabel, TEXT, valueText, zoneOf, type Text } from "./text.js";
 import { MAX_ROWS, sheetRef, Workbook, type Cell, type CellStyle, type Sheet } from "./xlsx.js";
 
 const S = {
@@ -34,7 +34,7 @@ const PICTURE_WIDTH = 640;
 const ROOM = 16;
 
 /** The evidence workbook: a summary, every change in one filterable list, and one sheet per step. */
-export function evidenceWorkbook(ev: Evidence): Buffer {
+export async function evidenceWorkbook(ev: Evidence): Promise<Buffer> {
   const t = TEXT[ev.lang];
   const book = new Workbook(ev.lang === "ja" ? "Yu Gothic" : "Calibri");
   const summary = book.sheet(t.summary);
@@ -45,7 +45,11 @@ export function evidenceWorkbook(ev: Evidence): Buffer {
 
   writeSummary(summary, ev, t, linkTo);
   writeAllChanges(all, ev, t, linkTo);
-  for (const step of ev.steps) writeStep(sheets.get(step.id)!, step, ev, t, `${sheetRef(summary.name)}!A1`);
+  for (const step of ev.steps) {
+    writeStep(sheets.get(step.id)!, step, ev, t, `${sheetRef(summary.name)}!A1`);
+    // let the recorder's server answer the app meanwhile (an export can run during a recording)
+    await new Promise((r) => setImmediate(r));
+  }
   return book.toBuffer();
 }
 
@@ -158,10 +162,6 @@ function writeStep(sheet: Sheet, step: Step, ev: Evidence, t: Text, back: string
     sheet.skip();
     writeTable(sheet, d, t);
   }
-}
-
-export function screenCaption(shot: Screenshot, t: Text): string {
-  return `${shot.moment === "before" ? t.screenBefore : t.screenAfter} (${shot.source === "replay" ? t.replay : t.video}, ${localTime(shot.at)})`;
 }
 
 function writeTable(sheet: Sheet, d: TableDiff, t: Text) {

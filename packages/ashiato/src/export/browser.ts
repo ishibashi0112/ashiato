@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { htmlText } from "./text.js";
 
 /**
  * Drives a locally installed Chrome or Edge (headless, over the DevTools pipe) to print the evidence
@@ -55,9 +56,11 @@ function baseArgs(profile: string): string[] {
     "--mute-audio",
     "--hide-scrollbars",
     "--force-color-profile=srgb",
-    // no network: no proxy, and every host name fails to resolve except localhost
-    "--no-proxy-server",
-    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost",
+    // no network but this machine's loopback (a replay may show images from the app's local server):
+    // every other request goes to a proxy that isn't there (loopback always bypasses the proxy), and
+    // names and addresses don't resolve
+    "--proxy-server=http://127.0.0.1:9",
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1",
     // as Playwright does: Linux distributions (and root, in containers) often can't run the sandbox
     ...(process.platform === "linux" ? ["--no-sandbox"] : []),
   ];
@@ -74,7 +77,8 @@ export class Browser {
   private nextId = 0;
   private readonly pending = new Map<number, Pending>();
   private readonly listeners = new Set<(msg: { method: string; sessionId?: string; params: Record<string, unknown> }) => void>();
-  private buffer = Buffer.alloc(0);
+  /** Chunks of the message being received. */
+  private chunks: Buffer[] = [];
   private stderr = "";
   private exited?: Error;
   private sessionId?: string;
@@ -148,9 +152,14 @@ export class Browser {
   /** Loads a URL in the page and waits for its load event. */
   async goto(url: string, timeoutMs = 120_000): Promise<void> {
     const loaded = this.waitFor("Page.loadEventFired", timeoutMs);
-    const nav = (await this.page("Page.navigate", { url }, timeoutMs)) as { errorText?: string };
-    if (nav.errorText) throw new Error(`Could not open ${url}: ${nav.errorText}`);
-    await loaded;
+    try {
+      const nav = (await this.page("Page.navigate", { url }, timeoutMs)) as { errorText?: string };
+      if (nav.errorText) throw new Error(`Could not open ${url}: ${nav.errorText}`);
+      await loaded.done;
+    } finally {
+      // a failed navigation leaves no load event to wait for (nor a timer to keep the process alive)
+      loaded.cancel();
+    }
   }
 
   /** Runs a JavaScript expression in the page (awaiting a promise) and returns its JSON value. */
@@ -181,7 +190,7 @@ export class Browser {
         headerTemplate: "<span></span>",
         footerTemplate:
           `<div style="font-size:7pt;width:100%;padding:0 10mm;color:#78716c;display:flex;justify-content:space-between">` +
-          `<span>${footer.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)}</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`,
+          `<span>${htmlText(footer)}</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`,
         transferMode: "ReturnAsStream",
       },
       300_000,
@@ -210,27 +219,36 @@ export class Browser {
     removeProfile(this.profile);
   }
 
-  private waitFor(method: string, timeoutMs: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+  /** An event of the page to wait for; `cancel` stops waiting. */
+  private waitFor(method: string, timeoutMs: number): { done: Promise<void>; cancel: () => void } {
+    let cancel = () => undefined as void;
+    const done = new Promise<void>((resolve, reject) => {
+      const stop = () => {
+        clearTimeout(timer);
         this.listeners.delete(listener);
+      };
+      const timer = setTimeout(() => {
+        stop();
         reject(new Error(`${method} did not arrive within ${timeoutMs}ms`));
       }, timeoutMs);
       const listener = (msg: { method: string; sessionId?: string }) => {
         if (msg.method !== method || msg.sessionId !== this.sessionId) return;
-        clearTimeout(timer);
-        this.listeners.delete(listener);
+        stop();
         resolve();
       };
       this.listeners.add(listener);
+      cancel = stop;
     });
+    return { done, cancel };
   }
 
+  /** Messages end with a NUL byte; a screenshot or a PDF part comes in many chunks. */
   private receive(chunk: Buffer) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    for (let end = this.buffer.indexOf(0); end >= 0; end = this.buffer.indexOf(0)) {
-      const text = this.buffer.subarray(0, end).toString("utf8");
-      this.buffer = this.buffer.subarray(end + 1);
+    let start = 0;
+    for (let end = chunk.indexOf(0); end >= 0; start = end + 1, end = chunk.indexOf(0, start)) {
+      this.chunks.push(chunk.subarray(start, end));
+      const text = Buffer.concat(this.chunks).toString("utf8");
+      this.chunks = [];
       let msg: { id?: number; method?: string; sessionId?: string; params?: Record<string, unknown>; result?: Record<string, unknown>; error?: { message: string } };
       try {
         msg = JSON.parse(text);
@@ -248,6 +266,7 @@ export class Browser {
         for (const l of [...this.listeners]) l({ method: msg.method, sessionId: msg.sessionId, params: msg.params ?? {} });
       }
     }
+    if (start < chunk.length) this.chunks.push(chunk.subarray(start));
   }
 }
 

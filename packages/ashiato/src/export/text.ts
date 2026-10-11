@@ -1,4 +1,5 @@
 import type { ActionInfo, JsonValue, RequestInfo, Step } from "../core/types.js";
+import type { Screenshot } from "./evidence.js";
 
 export type Lang = "en" | "ja";
 
@@ -46,7 +47,6 @@ const en = {
   outsideLabel: "outside actions",
   noKey: "No primary key: an update appears as a delete plus an insert.",
   noUserAction: "Request without a user action",
-  notShown: (n: number) => `${n} more rows are not shown here.`,
   notShownPdf: (n: number) => `${n} more rows are not shown here: see the Excel export.`,
   notWritten: (n: number) => `${n} more rows are not written (Excel's row limit).`,
   back: "Back to the summary",
@@ -55,6 +55,7 @@ const en = {
   goneTable: (name: string) => `Table gone: ${name} was dropped, renamed, or can no longer be read, so it is no longer watched.`,
   screensMissing: (why: string) => `Screenshots were not taken: ${why}`,
   screensFailed: (n: number) => `${n} screenshot(s) could not be taken.`,
+  noPageNumbers: "The PDF was printed without page numbers: the browser's remote debugging is turned off.",
 };
 
 const ja: typeof en = {
@@ -100,7 +101,6 @@ const ja: typeof en = {
   outsideLabel: "操作外の変更",
   noKey: "主キーがないため、更新は「削除+追加」として表示されます。",
   noUserAction: "ユーザー操作なしの通信",
-  notShown: (n: number) => `ほか ${n} 行は表示していません。`,
   notShownPdf: (n: number) => `ほか ${n} 行は表示していません(Excel 出力を参照)。`,
   notWritten: (n: number) => `ほか ${n} 行は Excel の行数の上限のため出力していません。`,
   back: "概要に戻る",
@@ -109,6 +109,7 @@ const ja: typeof en = {
   goneTable: (name: string) => `なくなったテーブル:${name}(削除・名前変更・読み取り不可のため、監視をやめました)`,
   screensMissing: (why: string) => `画面キャプチャは撮れませんでした:${why}`,
   screensFailed: (n: number) => `${n} 枚の画面キャプチャを撮れませんでした。`,
+  noPageNumbers: "ブラウザのリモートデバッグが無効なため、PDF はページ番号なしで印刷しました。",
 };
 
 export type Text = typeof en;
@@ -153,3 +154,12 @@ export const kindText = (r: RequestInfo) => (r.kind === "http" ? "HTTP" : r.kind
 
 /** A value as shown in a cell or table. */
 export const valueText = (v: JsonValue | undefined) => (v === null || v === undefined ? "NULL" : String(v));
+
+export function screenCaption(shot: Screenshot, t: Text): string {
+  return `${shot.moment === "before" ? t.screenBefore : t.screenAfter} (${shot.source === "replay" ? t.replay : t.video}, ${localTime(shot.at)})`;
+}
+
+/** Text escaped for HTML, without the control characters HTML can't show. */
+export function htmlText(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "\ufffd");
+}

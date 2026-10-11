@@ -1,8 +1,7 @@
 import { countChanges, tableId } from "../core/diff.js";
 import type { JsonValue, Step, TableDiff } from "../core/types.js";
-import { screenCaption } from "./excel.js";
 import { columnsOf, type Evidence } from "./evidence.js";
-import { actionText, kindText, localTime, stepLabel, TEXT, zoneOf, type Text } from "./text.js";
+import { actionText, htmlText as h, kindText, localTime, screenCaption, stepLabel, TEXT, valueText, zoneOf, type Text } from "./text.js";
 
 /** Rows shown per kind (inserted / updated / deleted) of a table; the Excel export has them all. */
 const ROW_LIMIT = 200;
@@ -130,11 +129,7 @@ ${hidden > 0 ? `<p class="note">${h(t.notShownPdf(hidden))}</p>` : ""}
 </div>`;
 }
 
-const value = (v: JsonValue | undefined) => (v === null || v === undefined ? `<i class="null">NULL</i>` : h(String(v)));
-
-function h(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "�");
-}
+const value = (v: JsonValue | undefined) => (v === null || v === undefined ? `<i class="null">NULL</i>` : h(valueText(v)));
 
 const CSS = `
 @page { size: A4 landscape; margin: 12mm 10mm 14mm; }

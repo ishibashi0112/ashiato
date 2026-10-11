@@ -67,18 +67,15 @@ export async function exportEvidence(session: Session, options: ExportOptions): 
   let pipeless = false;
   try {
     if (formats.includes("pdf") || wantScreens) {
-      executable = findBrowser(options.browser);
-      if (!executable) {
-        if (formats.includes("pdf")) throw new Error(`${NO_BROWSER} Excel and HTML exports work without one.`);
-        screensNote = t.screensMissing(NO_BROWSER);
-      } else {
-        try {
-          browser = await Browser.launch(executable);
-        } catch (e) {
-          if (!(e instanceof BrowserUnavailable)) throw e;
-          pipeless = true;
-          if (wantScreens) screensNote = t.screensMissing(e.message);
-        }
+      try {
+        executable = findBrowser(options.browser);
+        if (!executable) throw new Error(`${NO_BROWSER} Excel and HTML exports work without one.`);
+        browser = await Browser.launch(executable);
+      } catch (e) {
+        // the PDF can still be printed without the DevTools pipe; screenshots are a bonus Excel and HTML do without
+        if (e instanceof BrowserUnavailable) pipeless = true;
+        else if (formats.includes("pdf")) throw e;
+        if (wantScreens) screensNote = t.screensMissing((e as Error).message);
       }
     }
 
@@ -113,7 +110,7 @@ export async function exportEvidence(session: Session, options: ExportOptions): 
       exportedAt: new Date().toISOString(),
     };
     const files: ExportResult["files"] = {};
-    if (formats.includes("xlsx")) files.xlsx = evidenceWorkbook(evidence);
+    if (formats.includes("xlsx")) files.xlsx = await evidenceWorkbook(evidence);
     const html = formats.includes("html") || formats.includes("pdf") ? evidenceHtml(evidence) : undefined;
     if (formats.includes("html")) files.html = Buffer.from(html!, "utf8");
     if (formats.includes("pdf")) {
@@ -127,7 +124,7 @@ export async function exportEvidence(session: Session, options: ExportOptions): 
         files.pdf = await browser.pdf(`${t.title} · ${localTime(snapshot.startedAt)}`);
       } else if (pipeless && executable) {
         files.pdf = await printWithSwitch(executable, url);
-        notes.push("The PDF was printed without page numbers: the browser's DevTools pipe is not available.");
+        notes.push(t.noPageNumbers);
       }
     }
     return { files, notes };

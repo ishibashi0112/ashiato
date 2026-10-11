@@ -2,8 +2,9 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, inflateRawSync } from "node:zlib";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { main } from "../src/cli/main.js";
+import { MediaStore } from "../src/core/media.js";
 import type { Session } from "../src/core/types.js";
 import { evidenceWorkbook } from "../src/export/excel.js";
 import type { Evidence } from "../src/export/evidence.js";
@@ -51,9 +52,9 @@ const evidence = (session: Session, more: Partial<Evidence> = {}): Evidence => (
 const text = (files: Map<string, Buffer>, name: string) => files.get(name)!.toString("utf8");
 
 describe("zip", () => {
-  it("writes archives that inflate back to the same bytes", () => {
+  it("writes archives that inflate back to the same bytes", async () => {
     const big = Buffer.from("ashiato ".repeat(10_000));
-    const files = unzip(zip([{ name: "a.txt", data: "hello" }, { name: "dir/日本語.bin", data: big }, { name: "img.jpeg", data: Buffer.from([1, 2, 3]), store: true }]));
+    const files = unzip(await zip([{ name: "a.txt", data: "hello" }, { name: "dir/日本語.bin", data: big }, { name: "img.jpeg", data: Buffer.from([1, 2, 3]), store: true }]));
     expect([...files.keys()]).toEqual(["a.txt", "dir/日本語.bin", "img.jpeg"]);
     expect(files.get("a.txt")!.toString()).toBe("hello");
     expect(files.get("dir/日本語.bin")!.equals(big)).toBe(true);
@@ -75,14 +76,14 @@ describe("xlsx writer", () => {
     expect(book.sheet("").name).toBe("Sheet");
   });
 
-  it("anchors pictures below the rows before them and reserves the rows they cover", () => {
+  it("anchors pictures below the rows before them and reserves the rows they cover", async () => {
     const book = new Workbook();
     const sheet = book.sheet("s");
     sheet.add("caption");
     sheet.picture({ data: Buffer.from([0xff, 0xd8, 0xff]), type: "jpeg", width: 200, height: 100 });
     // 100 px = 5 rows of 20 px, plus one
     expect(sheet.add("next")).toBe(7);
-    const files = unzip(book.toBuffer());
+    const files = unzip(await book.toBuffer());
     expect(text(files, "[Content_Types].xml")).toContain('<Override PartName="/xl/drawings/drawing1.xml"');
     expect(text(files, "xl/worksheets/sheet1.xml")).toContain('<drawing r:id="rId1"/>');
     expect(text(files, "xl/worksheets/_rels/sheet1.xml.rels")).toContain('Target="../drawings/drawing1.xml"');
@@ -95,7 +96,10 @@ describe("xlsx writer", () => {
 });
 
 describe("evidence workbook", () => {
-  const files = unzip(evidenceWorkbook(evidence(sampleSession())));
+  let files: Map<string, Buffer>;
+  beforeAll(async () => {
+    files = unzip(await evidenceWorkbook(evidence(sampleSession())));
+  });
   const sheet = (n: number) => text(files, `xl/worksheets/sheet${n}.xml`);
 
   it("has a summary, a list of every change, and a sheet per step", () => {
@@ -124,8 +128,8 @@ describe("evidence workbook", () => {
 
   it("writes text Excel reads back unchanged: markup, control characters and its own _xHHHH_ escapes", () => {
     const step = sheet(4);
-    expect(step).toContain("line1\nline2 _x0001_ _x005F_x0041_ &lt;tag&gt; &amp; &quot;q&quot;");
-    expect(step).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f]/);
+    expect(step).toContain("line1_x000D_\nline2 _x0001_ _x005F_x0041_ &lt;tag&gt; &amp; &quot;q&quot;");
+    expect(step).not.toMatch(/[\x00-\x08\x0b-\x1f]/);
   });
 
   it("says why a step has no rows, which tables it couldn't compare, and which tables came and went", () => {
@@ -136,8 +140,8 @@ describe("evidence workbook", () => {
     expect(sheet(4)).toContain("No primary key");
   });
 
-  it("is in Japanese when asked", () => {
-    const ja = unzip(evidenceWorkbook(evidence(sampleSession(), { lang: "ja" })));
+  it("is in Japanese when asked", async () => {
+    const ja = unzip(await evidenceWorkbook(evidence(sampleSession(), { lang: "ja" })));
     expect(text(ja, "xl/workbook.xml")).toContain('<sheet name="概要"');
     expect(text(ja, "xl/workbook.xml")).toContain('<sheet name="#2 操作外の変更"');
     expect(text(ja, "xl/worksheets/sheet3.xml")).toContain("変更後");
@@ -183,6 +187,15 @@ describe("exportEvidence", () => {
     expect(html).toContain('id="step-5"');
     expect(html).toContain("<tr><th>Steps</th><td>4 / 5</td></tr>");
     expect(text(unzip(files.xlsx!), "xl/workbook.xml")).not.toContain("#3 checkpoint 3");
+  });
+
+  it("still writes Excel when the screenshots can't be taken, and says why", async () => {
+    const session = sampleSession();
+    const media = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-export-")), "session.json"), session);
+    media.appendReplay("tab-1", [{ type: 4, timestamp: Date.parse(session.startedAt), data: { href: "http://localhost/", width: 800, height: 600 } }]);
+    const { files, notes } = await exportEvidence(session, { formats: ["xlsx"], lang: "en", media, browser: "/no/such/browser" });
+    expect(notes).toEqual(["Screenshots were not taken: Browser not found: /no/such/browser"]);
+    expect(text(unzip(files.xlsx!), "xl/worksheets/sheet1.xml")).toContain("Screenshots were not taken: Browser not found: /no/such/browser");
   });
 
   it("needs a browser for PDF, and says which one it looked for", async () => {

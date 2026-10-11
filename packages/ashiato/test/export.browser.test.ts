@@ -3,7 +3,9 @@
  * The screenshots of replays and recordings are covered by the browser test of the Vite plugin.
  */
 import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -39,6 +41,29 @@ describe.skipIf(!canRun)("PDF export", () => {
     const pdf = await printWithSwitch(silent, pathToFileURL(html).href);
     expect(pdf.subarray(0, 5).toString()).toBe("%PDF-");
     expect(pages(pdf)).toBe(1);
+  }, 60_000);
+
+  it("keeps the browser off the network, except for this machine's loopback", async () => {
+    const lan = Object.values(networkInterfaces()).flat().find((a) => a && !a.internal && a.family === "IPv4")?.address;
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      if (req.url !== "/favicon.ico") hits.push(req.headers.host ?? "");
+      res.end("<!doctype html><title>ok</title>");
+    });
+    await new Promise<void>((r) => server.listen(0, "0.0.0.0", r));
+    const { port } = server.address() as AddressInfo;
+    const browser = await Browser.launch(browserPath!);
+    try {
+      await browser.goto(`http://127.0.0.1:${port}/`, 10_000);
+      await browser.goto(`http://localhost:${port}/`, 10_000);
+      await expect(browser.goto(`http://ashiato.example/`, 10_000)).rejects.toThrow(/Could not open/);
+      // the same server, reached by this machine's LAN address, is not loopback: the request goes nowhere
+      if (lan) await expect(browser.goto(`http://${lan}:${port}/`, 10_000)).rejects.toThrow(/Could not open/);
+      expect(hits).toEqual([`127.0.0.1:${port}`, `localhost:${port}`]);
+    } finally {
+      await browser.close();
+      server.close();
+    }
   }, 60_000);
 
   it("reports a browser that exits instead of starting", async () => {
