@@ -10,6 +10,7 @@ import { Recorder } from "../src/core/recorder.js";
 import { startServer } from "../src/server/server.js";
 import type { Session, Step } from "../src/core/types.js";
 import { createAppDb } from "./helpers.js";
+import { sampleSession } from "./fixtures/session.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 
@@ -101,6 +102,32 @@ describe("server", () => {
     expect(session.headers["access-control-allow-origin"]).toBeUndefined();
     expect((await raw("/api/session", { host: "evil.example:80" })).status).toBe(403);
     expect((await fetch(`${base}/api/session`)).status).toBe(200);
+  });
+
+  it("exports the evidence for the timeline only", async () => {
+    const session = sampleSession();
+    const server = await startServer({ port: 0, getSession: () => session, sessionFile: "/work/s.json" });
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const port = (server.address() as AddressInfo).port;
+    const raw = rawRequest(port);
+
+    const res = await fetch(`http://127.0.0.1:${port}/api/export?format=xlsx&lang=ja&changedOnly=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(res.headers.get("content-disposition")).toBe('attachment; filename="ashiato-2026-10-11T04-00-00-000Z.xlsx"');
+    const xlsx = Buffer.from(await res.arrayBuffer());
+    expect(xlsx.subarray(0, 2).toString()).toBe("PK");
+    // steps 1, 2, 4 and 5: step 3 changed nothing
+    expect(xlsx.includes(Buffer.from("xl/worksheets/sheet6.xml"))).toBe(true);
+    expect(xlsx.includes(Buffer.from("xl/worksheets/sheet7.xml"))).toBe(false);
+
+    const html = await fetch(`http://127.0.0.1:${port}/api/export?format=html&lang=en`);
+    expect(await html.text()).toContain("<td>/work/s.json</td>");
+    expect((await fetch(`http://127.0.0.1:${port}/api/export?format=docx`)).status).toBe(400);
+    // other web pages can't take the rows, nor make it start a browser
+    expect((await raw("/api/export?format=html", { origin: "http://evil.example" })).status).toBe(403);
+    expect((await raw("/api/export?format=pdf", { "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await raw("/api/export?format=html", { "sec-fetch-site": "same-origin" })).status).toBe(200);
   });
 
   it("stores screen replay events from the app and screen recordings from the UI", async () => {

@@ -8,4 +8,5 @@ export { Recorder, selectTables, type CheckpointOptions, type RecorderOptions } 
 export { takeSnapshot, type SnapshotOptions } from "./core/snapshot.js";
 export { loadSession, saveSession } from "./core/store.js";
 export type * from "./core/types.js";
+export { exportEvidence, type ExportFormat, type ExportOptions, type ExportResult } from "./export/index.js";
 export { startServer, type ServerOptions } from "./server/server.js";

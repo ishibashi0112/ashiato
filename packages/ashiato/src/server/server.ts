@@ -6,6 +6,8 @@ import { countChanges } from "../core/diff.js";
 import type { MediaStore } from "../core/media.js";
 import type { CheckpointOptions } from "../core/recorder.js";
 import type { ActionInfo, Session, Step } from "../core/types.js";
+import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
+import { langOf } from "../export/text.js";
 
 export interface ServerOptions {
   port: number;
@@ -19,7 +21,17 @@ export interface ServerOptions {
   onStep?: (listener: (step: Step) => void) => () => void;
   /** Screen replay events and screen recordings. */
   media?: MediaStore;
+  /** Path of the session file, shown in evidence exports. */
+  sessionFile?: string;
+  /** Chrome / Edge used for PDF exports and screenshots (default: found automatically). */
+  browser?: string;
 }
+
+const EXPORT_TYPES: Record<ExportFormat, string> = {
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pdf: "application/pdf",
+  html: "text/html; charset=utf-8",
+};
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -51,8 +63,15 @@ class HttpError extends Error {
  * browser script use to create checkpoints and store screen replays / recordings.
  */
 export function startServer(options: ServerOptions): Promise<Server> {
+  // one export at a time: each may start a browser
+  let exports: Promise<unknown> = Promise.resolve();
+  const exportOne = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = exports.then(run);
+    exports = next.catch(() => undefined);
+    return next;
+  };
   const server = createServer((req, res) => {
-    handle(req, res, options).catch((e: Error) => {
+    handle(req, res, options, exportOne).catch((e: Error) => {
       if (res.headersSent) return void res.end();
       sendJson(res, e instanceof HttpError ? e.status : 500, { error: e.message });
     });
@@ -65,7 +84,7 @@ export function startServer(options: ServerOptions): Promise<Server> {
 
 const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
 
-async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOptions) {
+async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOptions, exportOne: <T>(run: () => Promise<T>) => Promise<T>) {
   // DNS rebinding: a page on evil.example resolving to 127.0.0.1 would otherwise be same-origin.
   const host = req.headers.host ?? "";
   if (!LOOPBACK.test(host) && host.split(":")[0] !== o.host) return sendJson(res, 403, { error: "Forbidden host" });
@@ -117,6 +136,35 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
       const file = { path: path ?? "", size: path ? statSync(path).size : 0, mimeType: "application/x-ndjson; charset=utf-8" };
       return serveRange(req, res, file);
     }
+  }
+
+  if (url.pathname === "/api/export" && req.method === "GET") {
+    // recorded rows go into the file, and a PDF starts a browser: only the timeline itself may ask
+    const site = req.headers["sec-fetch-site"];
+    if (crossOrigin || (site !== undefined && site !== "same-origin" && site !== "none")) return sendJson(res, 403, { error: "Forbidden origin" });
+    const format = (url.searchParams.get("format") ?? "xlsx") as ExportFormat;
+    if (!EXPORT_FORMATS.includes(format)) throw new HttpError(400, `Unknown format: ${format}`);
+    const session = o.getSession();
+    const { files, notes } = await exportOne(() =>
+      exportEvidence(session, {
+        formats: [format],
+        lang: langOf(url.searchParams.get("lang") ?? undefined),
+        changedOnly: url.searchParams.get("changedOnly") === "1",
+        screens: url.searchParams.get("screens") !== "0",
+        media: o.media,
+        sessionFile: o.sessionFile,
+        browser: o.browser,
+      }),
+    );
+    const name = `ashiato-${session.startedAt.replace(/[:.]/g, "-")}.${format}`;
+    res.writeHead(200, {
+      "Content-Type": EXPORT_TYPES[format],
+      "Content-Disposition": `attachment; filename="${name}"`,
+      "Cache-Control": "no-store",
+      // what the user should know (screenshots missing...), for the timeline to show
+      ...(notes.length ? { "X-Ashiato-Notes": encodeURIComponent(notes.join("\n")) } : {}),
+    });
+    return void res.end(files[format]);
   }
 
   const video = /^\/api\/video(?:\/(\d+)(?:\/(chunk|stop))?)?$/.exec(url.pathname);

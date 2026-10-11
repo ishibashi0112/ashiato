@@ -13,6 +13,7 @@ import type { Browser, Page } from "playwright-core";
 import { createServer, type ViteDevServer } from "vite";
 import { connect } from "../src/adapters/index.js";
 import { MediaStore } from "../src/core/media.js";
+import { exportEvidence } from "../src/export/index.js";
 import { Recorder } from "../src/core/recorder.js";
 import type { Step } from "../src/core/types.js";
 import { startServer, type ServerOptions } from "../src/server/server.js";
@@ -35,6 +36,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
   let recorder: Recorder;
   let recorderUrl: string;
   let serverOptions: ServerOptions;
+  let sessionFile: string;
   const closers: (() => Promise<unknown>)[] = [];
   const app = createAppDb();
 
@@ -42,7 +44,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     const adapter = await connect(`sqlite:${app.file}`);
     recorder = new Recorder(adapter);
     const session = await recorder.start();
-    const media = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), session);
+    sessionFile = join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json");
+    const media = new MediaStore(sessionFile, session);
     serverOptions = {
       port: 0,
       uiDir,
@@ -53,6 +56,7 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
         return () => recorder.off("step", listener);
       },
       media,
+      browser: browserPath,
     };
     const rec = await startServer(serverOptions);
     recorderUrl = `http://127.0.0.1:${(rec.address() as AddressInfo).port}`;
@@ -327,4 +331,70 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
       serverOptions.media = before;
     }
   }, 30_000);
+  /** The HTML of one step's section of an evidence page. */
+  const sectionOf = (html: string, id: number) => {
+    const start = html.indexOf(`<section class="step" id="step-${id}">`);
+    return html.slice(start, html.indexOf("</section>", start));
+  };
+  const images = (section: string) => [...section.matchAll(/<img src="data:image\/jpeg;base64,([^"]+)"/g)].map((m) => Buffer.from(m[1]!, "base64"));
+
+  it("exports evidence with screenshots of the screen replay, in Excel, PDF and HTML", async () => {
+    const { files, notes } = await exportEvidence(recorder.session, {
+      formats: ["xlsx", "pdf", "html"],
+      lang: "en",
+      media: serverOptions.media,
+      browser: browserPath,
+    });
+    expect(notes).toEqual([]);
+    const html = files.html!.toString("utf8");
+    const step = await stepNamed('click button "保存"');
+    const section = sectionOf(html, step.id);
+    // just before the click, and at the checkpoint
+    expect(section).toContain("Screen just before the action (screen replay");
+    expect(section).toContain("Screen at the checkpoint (screen replay");
+    const [before, after] = images(section);
+    expect(before!.length).toBeGreaterThan(2000);
+    expect(after!.length).toBeGreaterThan(2000);
+    expect(before!.equals(after!)).toBe(false);
+    // changes no action made have no screen to show
+    const outside = recorder.session.steps.find((s) => s.source === "sync")!;
+    expect(images(sectionOf(html, outside.id))).toEqual([]);
+
+    expect(files.pdf!.subarray(0, 5).toString()).toBe("%PDF-");
+    const xlsx = files.xlsx!;
+    expect(xlsx.includes(Buffer.from("xl/media/image1.jpeg"))).toBe(true);
+    expect(xlsx.includes(Buffer.from("xl/drawings/drawing1.xml"))).toBe(true);
+  }, 60_000);
+
+  it("takes the screenshots from the screen recording when there is no replay", async () => {
+    const session = { ...recorder.session, replay: undefined };
+    const media = new MediaStore(sessionFile, session, undefined, true);
+    expect(media.replayPath()).toBeUndefined();
+    const { files, notes } = await exportEvidence(session, { formats: ["html"], lang: "en", media, browser: browserPath });
+    expect(notes).toEqual([]);
+    const html = files.html!.toString("utf8");
+    const video = recorder.session.videos![0]!;
+    const during = session.steps.filter((s) => s.source !== "sync" && Date.parse(s.at) > Date.parse(video.startedAt) && Date.parse(s.at) < Date.parse(video.endedAt!));
+    expect(during.length).toBeGreaterThan(0);
+    for (const step of during) {
+      const section = sectionOf(html, step.id);
+      expect(section).toContain("Screen at the checkpoint (screen recording");
+      expect(images(section).length).toBeGreaterThan(0);
+    }
+    // steps before the recording started have nothing to show
+    const earlier = session.steps.filter((s) => Date.parse(s.at) < Date.parse(video.startedAt) - 1000);
+    for (const step of earlier) expect(images(sectionOf(html, step.id))).toEqual([]);
+  }, 60_000);
+  it("downloads the evidence from the timeline", async () => {
+    const ui = await browser.newPage();
+    await ui.goto(recorderUrl);
+    for (const [button, ext] of [["⤓ Excel", "xlsx"], ["⤓ PDF", "pdf"]] as const) {
+      const [download] = await Promise.all([ui.waitForEvent("download", { timeout: 30_000 }), ui.getByRole("button", { name: button }).click()]);
+      expect(download.suggestedFilename()).toMatch(new RegExp(`^ashiato-.+\\.${ext}$`));
+      const file = await download.path();
+      expect(readFileSync(file).subarray(0, 2).toString()).toBe(ext === "xlsx" ? "PK" : "%P");
+    }
+    expect(await ui.locator("header .del").count()).toBe(0);
+    await ui.close();
+  }, 60_000);
 });
