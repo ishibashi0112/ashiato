@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -10,6 +10,8 @@ import { MediaStore } from "../core/media.js";
 import { Recorder } from "../core/recorder.js";
 import { loadSession, saveSession, sessionPath } from "../core/store.js";
 import type { Step, TableRef } from "../core/types.js";
+import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
+import type { Lang } from "../export/text.js";
 import { startServer } from "../server/server.js";
 
 const HELP = `ashiato — record what your app changes in the database
@@ -18,6 +20,7 @@ Usage:
   ashiato tables --db <url>
   ashiato record --db <url> [--tables a,b] [--ignore-columns updated_at] [--port 4100] [--no-ui]
   ashiato show <session.json> [--port 4100]
+  ashiato export <session.json> [--format xlsx,pdf,html] [--out <file>] [--lang ja|en] [--changed-only] [--no-screens]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
@@ -33,6 +36,14 @@ Options:
   --out <dir>             Where sessions are saved (default .ashiato/sessions)
   --port <n>              UI port (default 4100)
   --no-ui                 Terminal only
+
+Export (evidence of a saved session):
+  --format <list>         xlsx, pdf and / or html (default xlsx). PDF needs Chrome or Edge.
+  --out <file>            Output file (default: next to the session file, same name)
+  --lang <ja|en>          Language of the document (default: the machine's)
+  --changed-only          Leave out steps that changed no rows
+  --no-screens            No screenshots of the screen replay / recordings
+  --browser <path>        Chrome / Edge used for PDF and screenshots (or set ASHIATO_BROWSER)
 
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
@@ -60,6 +71,11 @@ export async function main(argv: string[]): Promise<void> {
       out: { type: "string" },
       port: { type: "string" },
       "no-ui": { type: "boolean" },
+      format: { type: "string" },
+      lang: { type: "string" },
+      "changed-only": { type: "boolean" },
+      "no-screens": { type: "boolean" },
+      browser: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -74,8 +90,42 @@ export async function main(argv: string[]): Promise<void> {
     if (!file) throw new Error("Usage: ashiato show <session.json>");
     const session = loadSession(resolve(file));
     const media = new MediaStore(resolve(file), session, undefined, true);
-    await listen(port, { uiDir: uiDir(), getSession: () => session, media });
+    await listen(port, { uiDir: uiDir(), getSession: () => session, media, sessionFile: resolve(file), browser: values.browser });
     console.log(`Viewing ${file} at http://127.0.0.1:${port}  (Ctrl+C to quit)`);
+    return;
+  }
+
+  if (command === "export") {
+    const file = rest[0];
+    if (!file) throw new Error("Usage: ashiato export <session.json> [--format xlsx,pdf,html]");
+    const formats = (list(values.format) ?? ["xlsx"]).map((f) => f.toLowerCase());
+    const unknown = formats.filter((f) => !EXPORT_FORMATS.includes(f as ExportFormat));
+    if (unknown.length) throw new Error(`Unknown export format: ${unknown.join(", ")} (use ${EXPORT_FORMATS.join(", ")})`);
+    if (values.lang && values.lang !== "ja" && values.lang !== "en") throw new Error("--lang must be ja or en");
+    const path = resolve(file);
+    const session = loadSession(path);
+    const { files, notes } = await exportEvidence(session, {
+      formats: formats as ExportFormat[],
+      lang: values.lang as Lang | undefined,
+      changedOnly: values["changed-only"],
+      screens: !values["no-screens"],
+      browser: values.browser,
+      media: new MediaStore(path, session, undefined, true),
+      sessionFile: path,
+      log: (m) => console.log(m),
+    });
+    // --out evidence/login.xlsx, --out evidence/login (for several formats) or --out evidence/ (a folder)
+    let out = values.out ? resolve(values.out) : path;
+    if (values.out && (/[/\\]$/.test(values.out) || statSync(out, { throwIfNoEntry: false })?.isDirectory())) out = join(out, basename(path));
+    const ext = extname(out);
+    const base = EXPORT_FORMATS.includes(ext.slice(1).toLowerCase() as ExportFormat) || ext.toLowerCase() === ".json" ? out.slice(0, -ext.length) : out;
+    for (const [format, data] of Object.entries(files)) {
+      const target = `${base}.${format}`;
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, data);
+      console.log(`Wrote ${target}`);
+    }
+    for (const n of notes) console.log(`Note: ${n}`);
     return;
   }
 
@@ -141,6 +191,8 @@ export async function main(argv: string[]): Promise<void> {
         return () => recorder.off("step", listener);
       },
       media,
+      sessionFile: file,
+      browser: values.browser,
     }).catch(async (e: Error) => {
       await db.close().catch(() => undefined);
       throw e;

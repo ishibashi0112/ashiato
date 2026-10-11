@@ -36,6 +36,7 @@ export function App() {
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [hideEmpty, setHideEmpty] = useState(false);
+  const [exporting, setExporting] = useState<"xlsx" | "pdf">();
   const [replay, setReplay] = useState<ReplayTabs>(new Map());
   const [replayVersion, setReplayVersion] = useState(0);
   const replayState = useRef<ReplayState>(emptyReplay());
@@ -132,6 +133,30 @@ export function App() {
     }
   }
 
+  /** Downloads the evidence of the session (the steps shown in the list) as Excel or PDF. */
+  async function exportAs(format: "xlsx" | "pdf") {
+    setExporting(format);
+    setNotice(undefined);
+    try {
+      const params = new URLSearchParams({ format, lang: navigator.language, ...(hideEmpty ? { changedOnly: "1" } : {}) });
+      const res = await fetch(`api/export?${params}`);
+      if (!res.ok) throw new Error(((await res.json()) as { error: string }).error);
+      const url = URL.createObjectURL(await res.blob());
+      const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? `ashiato.${format}`;
+      const a = Object.assign(document.createElement("a"), { href: url, download: name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      const notes = res.headers.get("x-ashiato-notes");
+      if (notes) setNotice(decodeURIComponent(notes));
+    } catch (err) {
+      setNotice(`Export failed: ${(err as Error).message}`);
+    } finally {
+      setExporting(undefined);
+    }
+  }
+
   if (error) return <div className="empty">Error: {error}</div>;
   if (!session) return <div className="empty">Loading…</div>;
 
@@ -150,6 +175,14 @@ export function App() {
         )}
         {screen.error && <span className="del small">{screen.error}</span>}
         {notice && <span className="del small">{notice}</span>}
+        <span className="export">
+          <button type="button" disabled={Boolean(exporting)} onClick={() => void exportAs("xlsx")} title="Evidence of the steps listed, as an Excel workbook">
+            {exporting === "xlsx" ? "Exporting…" : "⤓ Excel"}
+          </button>
+          <button type="button" disabled={Boolean(exporting)} onClick={() => void exportAs("pdf")} title="Evidence of the steps listed, as a PDF (printed by Chrome / Edge)">
+            {exporting === "pdf" ? "Exporting…" : "⤓ PDF"}
+          </button>
+        </span>
         {session.live && (
           <form onSubmit={checkpoint} className="checkpoint">
             <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. click Save)" />
