@@ -273,6 +273,18 @@ export class Tracker {
     return !a.done && a.wrote && ![...a.inflight].some((r) => r.writes);
   }
 
+  /**
+   * Takes the checkpoint of the actions other than `except` that are done writing. More than one can
+   * only be when their writes overlapped: their changes are all in the database, so they make one step.
+   */
+  private checkpointDone(except: Action): Sent | undefined {
+    const done = [...this.active].filter((a) => a !== except && this.doneWriting(a));
+    const into = done.pop();
+    if (!into) return undefined;
+    for (const a of done) this.merge(a, into);
+    return this.checkpointNow(into);
+  }
+
   /** Writes of actions other than `action` that have been sent and are still running. */
   private sentWrites(action: Action): Pending[] {
     return [...this.active].filter((a) => a !== action).flatMap((a) => [...a.inflight].filter((r) => r.sent !== undefined && this.running(r)));
@@ -293,7 +305,7 @@ export class Tracker {
     this.active.add(action);
     if (!this.o.syncBefore || this.syncStuck) {
       // no sync, but actions done writing still get their checkpoint before this one's requests
-      if (!others.some((a) => this.writing(a))) for (const a of others) if (this.doneWriting(a)) this.checkpointNow(a);
+      if (!others.some((a) => this.writing(a))) this.checkpointDone(action);
       return this.gate;
     }
     const deadline = this.o.now() + this.o.syncTimeoutMs;
@@ -365,7 +377,7 @@ export class Tracker {
     // meanwhile), and behind every checkpoint queued since
     let sent = action.before && !action.before.answered && this.o.now() - action.started <= this.o.mergeMs ? this.last : undefined;
     // actions done writing but still reading or settling: their checkpoint first, or their changes would land in this one's step
-    for (const a of [...this.active]) if (a !== action && this.doneWriting(a)) sent = this.checkpointNow(a);
+    sent = this.checkpointDone(action) ?? sent;
     // one not handed to the recorder yet reads the tables after this point too
     if (!sent && this.last && !this.last.started && !this.last.sync) sent = this.last;
     const s = sent ?? this.send({ label: "outside actions", source: "sync", dropIfEmpty: true });

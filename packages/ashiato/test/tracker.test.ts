@@ -662,6 +662,31 @@ describe("Tracker", () => {
     b.end();
   });
 
+  it("keeps two clicks whose writes overlapped in one step when a third click starts", async () => {
+    const t = make();
+    t.userAction("click", 'button "Save A"');
+    const a = t.beginRequest({ kind: "http", method: "POST", url: "/a" });
+    const slowA = t.beginRequest({ kind: "http", method: "GET", url: "/slow-a" });
+    await flush(300);
+    t.userAction("click", 'button "Save B"'); // while A's POST runs
+    const b = t.beginRequest({ kind: "http", method: "POST", url: "/b" });
+    await flush(500);
+    b.end({ status: 200 });
+    const list = t.beginRequest({ kind: "http", method: "GET", url: "/list" });
+    await flush(200);
+    a.end({ status: 200 }); // both POSTs are done; their GETs still run
+    await flush(100);
+    t.userAction("click", 'button "Open"');
+    t.beginRequest({ kind: "http", method: "GET", url: "/detail" }).end({ status: 200 });
+    await flush(0);
+    slowA.end({ status: 200 });
+    list.end({ status: 200 });
+    await flush(1000);
+    const steps = sent.filter((p) => p.source !== "sync" && !p.dropIfEmpty);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]?.action?.requests.map((r) => r.url)).toEqual(["/a", "/slow-a", "/b", "/list"]);
+  });
+
   it("names a merged step after the click, not after a request with no click", async () => {
     const t = make();
     t.userAction("click", 'button "Generate"');
