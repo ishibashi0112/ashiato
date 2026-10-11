@@ -1,4 +1,4 @@
-import { normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
@@ -31,6 +31,41 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     const req = pool.request();
     for (const [k, v] of Object.entries(inputs)) req.input(k, mssql.NVarChar, v);
     return (await req.query(sql)).recordset as Record<string, unknown>[];
+  };
+
+  // tedious reads DECIMAL / NUMERIC and MONEY as floating point numbers, which rounds values with
+  // more than 15 significant digits: such columns are read as text (money with all four decimals).
+  const columnLists = new Map<string, Promise<{ select: (alias?: string) => string; exact: string[] }>>();
+  const columnsOf = (t: TableRef) => {
+    let c = columnLists.get(name(t));
+    if (!c) {
+      c = query(
+        `SELECT name, TYPE_NAME(system_type_id) AS type, precision FROM sys.columns
+          WHERE object_id = OBJECT_ID(@t) AND ISNULL(COLUMNPROPERTY(object_id, name, 'IsHidden'), 0) = 0
+          ORDER BY column_id`,
+        { t: name(t) },
+      ).then((cols) => {
+        const wide = (c: Record<string, unknown>) => c.type === "money" || (/^(decimal|numeric)$/.test(String(c.type)) && Number(c.precision) > 15);
+        const exact = cols.filter(wide).map((c) => String(c.name));
+        if (exact.length === 0) return { select: (alias?: string) => (alias ? `${alias}.*` : "*"), exact };
+        const select = (alias?: string) =>
+          cols
+            .map((c) => {
+              const col = `${alias ? `${alias}.` : ""}${q(String(c.name))}`;
+              if (!wide(c)) return col;
+              return `CONVERT(varchar(50), ${col}${c.type === "money" ? ", 2" : ""}) AS ${q(String(c.name))}`;
+            })
+            .join(", ");
+        return { select, exact };
+      });
+      c.catch(() => columnLists.delete(name(t)));
+      columnLists.set(name(t), c);
+    }
+    return c;
+  };
+  const exactRow = (row: Row, exact: string[]) => {
+    for (const c of exact) row[c] = exactDecimal(row[c]);
+    return row;
   };
 
   // Signature: the table's rowversion column when it has one (a new, larger value on every insert
@@ -85,7 +120,8 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
       return Number(rows[0]?.n ?? 0);
     },
     async readRows(t): Promise<Row[]> {
-      return (await query(`SELECT * FROM ${name(t)}`)).map(normalizeRow);
+      const { select, exact } = await columnsOf(t);
+      return (await query(`SELECT ${select()} FROM ${name(t)}`)).map((r) => exactRow(normalizeRow(r), exact));
     },
     async bucketSums(t, key, n) {
       const b = bucketOf(key, n);
@@ -97,9 +133,14 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     async readBuckets(t, key, n, which) {
       const b = bucketOf(key, n);
       const { from, sig } = await signed(t);
+      const { select, exact } = await columnsOf(t);
       const where = which ? ` WHERE ${b} IN (${bucketList(which)})` : "";
-      return (await query(`SELECT ${b} AS ${q(BUCKET)}, CAST(${sig} AS VARCHAR(20)) AS ${q(SIG)}, ${ALIAS}.* FROM ${from}${where}`)).map(
-        toBucketedRow,
+      return (await query(`SELECT ${b} AS ${q(BUCKET)}, CAST(${sig} AS VARCHAR(20)) AS ${q(SIG)}, ${select(ALIAS)} FROM ${from}${where}`)).map(
+        (r) => {
+          const b = toBucketedRow(r);
+          exactRow(b.row, exact);
+          return b;
+        },
       );
     },
     async close() {

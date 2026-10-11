@@ -103,7 +103,7 @@ Rows are kept in memory, so `--max-rows` still applies.
 | Oracle | `oracle://user:pass@host:1521/service?schema=OWNER` | `oracledb` (Thin mode, no Instant Client) |
 | PostgreSQL | `postgres://user:pass@host:5432/db` | `pg` |
 | MySQL / MariaDB | `mysql://user:pass@host:3306/db` | `mysql2` |
-| SQLite | `sqlite:./dev.db` | built in (Node.js 22.5+) |
+| SQLite | `sqlite:./dev.db` | built in (Node.js 22.13+; 22.5–22.12 need `--experimental-sqlite`) |
 
 The URL can also come from the `ASHIATO_DB_URL` environment variable.
 
@@ -142,7 +142,6 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 - Tables without a primary key are compared row by row, so an update appears as a delete plus an insert.
 - The first snapshot reads the watched tables in full and keeps them in memory; later checkpoints re-read only what changed (see [Large tables](#large-tables)). Tables above `--max-rows` are skipped. A step lists any table it could not compare (too large, or unreadable).
 - Tables are chosen when recording starts; tables created later are not watched.
-- Oracle `TIMESTAMP` values are compared to the millisecond.
 
 ## Roadmap
 
@@ -232,7 +231,6 @@ export default defineConfig({
 - 主キーのないテーブルは行全体で比較するため、更新は「削除+追加」として表示されます
 - 最初のスナップショットで対象テーブルを全件読んでメモリに保持し、以降は変わった部分だけを読み直します(「大きなテーブル」参照)。`--max-rows` を超えるテーブルはスキップし、比較できなかったテーブル(大きすぎる・読めない)は各ステップに表示します
 - 対象テーブルは記録開始時に決まります。開始後に作られたテーブルは対象外です
-- Oracle の `TIMESTAMP` はミリ秒単位で比較します
 
 ### ロードマップ
 

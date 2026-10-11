@@ -60,7 +60,7 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
     async listTables() {
       const rows = await query(
         `SELECT TABLE_SCHEMA AS s, TABLE_NAME AS n FROM information_schema.TABLES
-          WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`,
+          WHERE TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VERSIONED') AND TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME`,
       );
       return rows.map((r) => ({ schema: String(r.s), name: String(r.n) }));
     },

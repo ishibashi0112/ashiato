@@ -10,9 +10,10 @@ const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
 /**
  * Types read as the server's text instead of being parsed: dates and times (pg's Date drops
  * microseconds and shifts DATE / TIMESTAMP by the local time zone), intervals, and JSON.
- * date, time, timestamp, timestamptz, timetz, interval, json, jsonb, and their arrays.
+ * date, time, timestamp, timestamptz, timetz, interval, json, jsonb, and their arrays; numeric[]
+ * (pg parses it as floats, while plain numeric already stays text).
  */
-const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807]);
+const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807, 1231]);
 
 export async function connectPostgres(url: URL): Promise<DbAdapter> {
   const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");

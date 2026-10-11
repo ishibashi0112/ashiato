@@ -9,7 +9,7 @@ import { formatStep } from "../core/format.js";
 import { MediaStore } from "../core/media.js";
 import { Recorder } from "../core/recorder.js";
 import { loadSession, saveSession, sessionPath } from "../core/store.js";
-import type { Step } from "../core/types.js";
+import type { Step, TableRef } from "../core/types.js";
 import { startServer } from "../server/server.js";
 
 const HELP = `ashiato — record what your app changes in the database
@@ -112,11 +112,20 @@ export async function main(argv: string[]): Promise<void> {
     console.log(`  ${tableId(f.table)} is read in full at each checkpoint (${f.reason})`);
   }
 
-  // tables that stay skipped (too large) are reported again only when the set changes
-  let lastSkipped = JSON.stringify(recorder.skippedTables().map((s) => tableId(s.table)));
+  // tables that stay skipped (too large) are reported again only when the set or a reason changes
+  // (row counts of a too-large table change all the time; only an error's text is worth repeating)
+  const kind = (reason: string) => (reason.startsWith("could not be read") ? reason : /more than max rows/.test(reason) ? "too large" : "");
+  const skippedText = (list: { table: TableRef; reason: string }[]) => JSON.stringify(list.map((s) => [tableId(s.table), kind(s.reason)]));
+  let lastSkipped = skippedText(
+    recorder.skippedTables().map((s) => ({ table: s.table, reason: s.error ? `could not be read: ${s.error}` : "more than max rows" })),
+  );
   recorder.on("step", (step: Step) => {
-    saveSession(file, session);
-    const skipped = JSON.stringify((step.skipped ?? []).map((s) => tableId(s.table)));
+    try {
+      saveSession(file, session);
+    } catch (e) {
+      console.error(`Could not save ${file}: ${(e as Error).message}`);
+    }
+    const skipped = skippedText(step.skipped ?? []);
     console.log(formatStep(step, 5, skipped !== lastSkipped));
     lastSkipped = skipped;
   });

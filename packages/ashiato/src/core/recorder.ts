@@ -81,8 +81,10 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
     const next = await this.snapshot();
     const diff = diffSnapshots(this.last, next, { ignoreColumns: this.options.ignoreColumns });
     const skipped = skippedBetween(this.last, next, this.options.maxRows ?? 100_000);
+    const newlySkipped = next.tables.some((t) => t.skipped && !this.last!.tables.find((b) => tableId(b.table) === tableId(t.table))?.skipped);
     this.last = next;
-    if (options.dropIfEmpty && diff.tables.length === 0) return null;
+    // a table that just became unreadable is worth a step even without changes: it says why
+    if (options.dropIfEmpty && diff.tables.length === 0 && !newlySkipped) return null;
     const step: Step = {
       id: this.session.steps.length + 1,
       label,

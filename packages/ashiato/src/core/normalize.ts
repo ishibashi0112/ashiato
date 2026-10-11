@@ -25,8 +25,9 @@ export function normalizeValue(v: unknown): JsonValue {
     const j = toJSON.call(v);
     return typeof j === "string" ? j : stringify(j);
   }
-  // decimal-like objects print their exact value
-  if ((v as object).toString !== Object.prototype.toString) return String(v);
+  // decimal-like objects print their exact value (a JSON document may have a "toString" key that isn't a function)
+  const toString = (v as { toString?: unknown }).toString;
+  if (typeof toString === "function" && toString !== Object.prototype.toString) return String(v);
   return stringify(v);
 }
 
@@ -45,6 +46,19 @@ function dateText(d: Date): JsonValue {
   if (!extra) return iso;
   const digits = String(Math.round(extra * 1e7)).padStart(4, "0");
   return iso.replace(/Z$/, `${digits}Z`);
+}
+
+/**
+ * A decimal the driver hands over as text: a plain number when that is exact, otherwise the text
+ * without trailing zeros (so 1.50 and 1.5 compare equal). Oracle's thin driver writes 0.5 as ".5".
+ */
+export function exactDecimal(raw: unknown): JsonValue {
+  if (raw === null || raw === undefined) return null;
+  let s = String(raw).trim().replace(/^(-?)\./, "$10.");
+  if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  if (s === "-0") s = "0";
+  const n = Number(s);
+  return String(n) === s ? n : s;
 }
 
 export function normalizeRow(raw: Record<string, unknown>): Row {

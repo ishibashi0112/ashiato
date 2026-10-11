@@ -23,6 +23,8 @@ interface Writer {
 interface Dialect {
   /** Column types for: a 64-bit integer, a timestamp with sub-millisecond precision, a JSON document. */
   types: { big: string; ts: string; doc: string };
+  /** A decimal with more digits than a float holds. */
+  dec: string;
   /** Literal for 2026-10-11 10:00:00.000100. */
   ts: string;
   /** Adds one microsecond to the ts column, or undefined when the adapter keeps only milliseconds. */
@@ -49,6 +51,7 @@ const withUser = (url: string, user: string, password: string, params: Record<st
 const dialects: Record<string, Dialect> = {
   postgres: {
     types: { big: "BIGINT", ts: "TIMESTAMP(6)", doc: "JSONB" },
+    dec: "NUMERIC(38, 18)",
     ts: "'2026-10-11 10:00:00.0001'",
     addMicrosecond: "ts + interval '1 microsecond'",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT g, g % 10, '${NOTE}' FROM generate_series(1, ${n}) g`,
@@ -74,6 +77,7 @@ const dialects: Record<string, Dialect> = {
   },
   mysql: {
     types: { big: "BIGINT", ts: "DATETIME(6)", doc: "JSON" },
+    dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.000100'",
     addMicrosecond: "ts + INTERVAL 1 MICROSECOND",
     // a recursive CTE stops at 1000 rows by default (cte_max_recursion_depth): cross join digits instead
@@ -101,6 +105,7 @@ const dialects: Record<string, Dialect> = {
   },
   mssql: {
     types: { big: "BIGINT", ts: "DATETIME2(7)", doc: "NVARCHAR(200)" },
+    dec: "DECIMAL(38, 18)",
     ts: "'2026-10-11 10:00:00.0001000'",
     addMicrosecond: "DATEADD(microsecond, 1, ts)",
     fill: (t, n) =>
@@ -135,9 +140,9 @@ const dialects: Record<string, Dialect> = {
   },
   oracle: {
     types: { big: "NUMBER(19)", ts: "TIMESTAMP(6)", doc: "VARCHAR2(200)" },
+    dec: "NUMBER(38, 18)",
     ts: "TIMESTAMP '2026-10-11 10:00:00.000100'",
-    // DATE / TIMESTAMP are read through the driver's Date: milliseconds only
-    addMicrosecond: undefined,
+    addMicrosecond: "ts + NUMTODSINTERVAL(0.000001, 'SECOND')",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT LEVEL, MOD(LEVEL, 10), '${NOTE}' FROM dual CONNECT BY LEVEL <= ${n}`,
     async writer(url) {
       const oracledb = await loadDriver<typeof import("oracledb")>("oracledb", "Oracle");
@@ -184,8 +189,12 @@ for (const [dialect, d] of Object.entries(dialects)) {
       const tables = ["ashiato_orders", "ashiato_stock"];
       for (const t of tables) await w.run(`DROP TABLE ${t}`).catch(() => undefined);
       await w.run("CREATE TABLE ashiato_orders (id INT PRIMARY KEY, qty INT, note VARCHAR(20))");
-      await w.run(`CREATE TABLE ashiato_stock (item_id INT PRIMARY KEY, qty INT, big ${d.types.big}, ts ${d.types.ts}, doc ${d.types.doc})`);
-      await w.run(`INSERT INTO ashiato_stock (item_id, qty, big, ts, doc) VALUES (3, 50, 9007199254740993, ${d.ts}, '[{"qty":1},{"qty":2}]')`);
+      await w.run(
+        `CREATE TABLE ashiato_stock (item_id INT PRIMARY KEY, qty INT, big ${d.types.big}, ts ${d.types.ts}, doc ${d.types.doc}, amount ${d.dec})`,
+      );
+      await w.run(
+        `INSERT INTO ashiato_stock (item_id, qty, big, ts, doc, amount) VALUES (3, 50, 9007199254740993, ${d.ts}, '[{"qty":1},{"qty":2}]', 1.000000000000000001)`,
+      );
 
       const db = await connect(await w.readOnlyUrl(tables));
       try {
@@ -209,12 +218,12 @@ for (const [dialect, d] of Object.entries(dialects)) {
         expect(lower(stock?.updated[0]?.after)).toMatchObject({ qty: 40, big: "9007199254740993" });
 
         // values a float or a millisecond Date would lose
-        await w.run(`UPDATE ashiato_stock SET big = 9007199254740995, doc = '[{"qty":1},{"qty":3}]'`);
+        await w.run(`UPDATE ashiato_stock SET big = 9007199254740995, doc = '[{"qty":1},{"qty":3}]', amount = 1.000000000000000002`);
         if (d.addMicrosecond) await w.run(`UPDATE ashiato_stock SET ts = ${d.addMicrosecond}`);
         const exact = await recorder.checkpoint("exact");
         const changed = exact.diff.tables[0]?.updated[0]?.changed.map((c) => c.toLowerCase()).sort();
-        expect(changed).toEqual(d.addMicrosecond ? ["big", "doc", "ts"] : ["big", "doc"]);
-        expect(lower(exact.diff.tables[0]?.updated[0]?.after).big).toBe("9007199254740995");
+        expect(changed).toEqual(d.addMicrosecond ? ["amount", "big", "doc", "ts"] : ["amount", "big", "doc"]);
+        expect(lower(exact.diff.tables[0]?.updated[0]?.after)).toMatchObject({ big: "9007199254740995", amount: "1.000000000000000002" });
 
         // nothing changed: nothing reported
         expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);

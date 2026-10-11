@@ -13,6 +13,8 @@ class FakeDb implements DbAdapter {
   readonly tables = new Map<string, { key: string[]; rows: { row: Row; version: number }[] }>();
   readonly reads: { table: string; which?: number[] }[] = [];
   failBuckets = new Set<string>();
+  /** Tables that can't be read at all (dropped, permission revoked). */
+  unreadable = new Set<string>();
   /** Runs inside readBuckets, after the sums were taken: simulates the app writing in between. */
   duringRead?: () => void;
 
@@ -33,6 +35,7 @@ class FakeDb implements DbAdapter {
     t.rows = t.rows.filter((x) => !match(x.row));
   }
   private t(name: string) {
+    if (this.unreadable.has(name)) throw new Error(`permission denied for table ${name}`);
     return this.tables.get(name)!;
   }
   private bucket(key: string[], row: Row, n: number) {
@@ -229,5 +232,17 @@ describe("incremental reads", () => {
     expect(db.reads).toEqual([]);
     db.insert("logs", { m: "c" });
     expect(only(await recorder.checkpoint("log")).inserted).toEqual([{ m: "c" }]);
+  });
+
+  it("keeps a checkpoint that would be dropped for having no changes when a table just became unreadable", async () => {
+    const db = new FakeDb();
+    db.create("stock", ["id"], items(10));
+    const recorder = new Recorder(db);
+    await recorder.start();
+    db.unreadable.add("stock");
+    const sync = await recorder.checkpoint("outside actions", "sync", { dropIfEmpty: true });
+    expect(sync?.skipped).toEqual([{ table: { name: "stock" }, reason: "could not be read: permission denied for table stock" }]);
+    // still unreadable: nothing new to say, so an empty sync is dropped again
+    expect(await recorder.checkpoint("outside actions", "sync", { dropIfEmpty: true })).toBeNull();
   });
 });
