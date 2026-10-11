@@ -5,12 +5,23 @@ export type { DbAdapter } from "./types.js";
 /**
  * Opens a read-only adapter from a connection URL:
  *   sqlite:./dev.db
- *   mssql://user:pass@host:1433/database?encrypt=false
+ *   mssql://user:pass@host:1433/database?encrypt=true
  *   oracle://user:pass@host:1521/service?schema=OWNER
  *   postgres://user:pass@host:5432/database
  *   mysql://user:pass@host:3306/database
  */
 export async function connect(connection: string): Promise<DbAdapter> {
+  try {
+    return await open(connection);
+  } catch (e) {
+    if (e instanceof URIError) {
+      throw new Error("Could not read the user name or password in the URL: percent-encode special characters (% → %25, @ → %40, : → %3A)");
+    }
+    throw e;
+  }
+}
+
+async function open(connection: string): Promise<DbAdapter> {
   if (connection.startsWith("sqlite:")) {
     const { connectSqlite } = await import("./sqlite.js");
     return connectSqlite(connection.slice("sqlite:".length).replace(/^\/\//, ""));

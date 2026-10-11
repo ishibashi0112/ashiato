@@ -13,15 +13,38 @@ export function normalizeValue(v: unknown): JsonValue {
     case "number":
       return Number.isFinite(v) ? v : String(v);
     case "bigint":
-      return v.toString();
+      return v >= MIN_SAFE && v <= MAX_SAFE ? Number(v) : v.toString();
   }
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
+  if (v instanceof Date) return dateText(v);
   if (v instanceof Uint8Array) return `0x${Buffer.from(v).toString("hex")}`;
-  if (typeof v === "object" && typeof (v as { toString?: unknown }).toString === "function") {
-    const s = String(v);
-    if (s !== "[object Object]") return s;
+  // arrays and JSON values (Postgres arrays, MySQL JSON): compare their whole content
+  if (Array.isArray(v)) return stringify(v);
+  // driver objects that know their JSON form (oracledb DbObject, decimal libraries)
+  const toJSON = (v as { toJSON?: () => unknown }).toJSON;
+  if (typeof toJSON === "function") {
+    const j = toJSON.call(v);
+    return typeof j === "string" ? j : stringify(j);
   }
-  return JSON.stringify(v);
+  // decimal-like objects print their exact value
+  if ((v as object).toString !== Object.prototype.toString) return String(v);
+  return stringify(v);
+}
+
+const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+function stringify(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) => (typeof x === "bigint" ? x.toString() : x)) ?? "null";
+}
+
+/** ISO text, keeping the sub-millisecond digits SQL Server's driver puts in `nanosecondsDelta` (datetime2, time). */
+function dateText(d: Date): JsonValue {
+  if (Number.isNaN(d.getTime())) return null;
+  const iso = d.toISOString();
+  const extra = (d as Date & { nanosecondsDelta?: number }).nanosecondsDelta;
+  if (!extra) return iso;
+  const digits = String(Math.round(extra * 1e7)).padStart(4, "0");
+  return iso.replace(/Z$/, `${digits}Z`);
 }
 
 export function normalizeRow(raw: Record<string, unknown>): Row {

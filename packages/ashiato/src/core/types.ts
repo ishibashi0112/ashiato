@@ -14,9 +14,16 @@ export interface TableSnapshot {
   /** Primary key columns. Empty when the table has no primary key. */
   key: string[];
   rows: Row[];
-  /** True when the table had more rows than `maxRows` and was not read. */
+  /** True when the table was not read: more rows than `maxRows`, or reading it failed (see `error`). */
   skipped?: boolean;
+  error?: string;
   rowCount: number;
+}
+
+/** A watched table a step could not compare, and why. */
+export interface SkippedTable {
+  table: TableRef;
+  reason: string;
 }
 
 export interface Snapshot {
@@ -78,6 +85,8 @@ export interface Step {
   source?: string;
   action?: ActionInfo;
   diff: Diff;
+  /** Watched tables this step could not compare (too large, or unreadable). Their changes are not in `diff`. */
+  skipped?: SkippedTable[];
   durationMs: number;
 }
 
