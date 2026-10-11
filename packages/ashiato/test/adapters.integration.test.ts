@@ -76,8 +76,12 @@ const dialects: Record<string, Dialect> = {
     types: { big: "BIGINT", ts: "DATETIME(6)", doc: "JSON" },
     ts: "'2026-10-11 10:00:00.000100'",
     addMicrosecond: "ts + INTERVAL 1 MICROSECOND",
-    fill: (t, n) =>
-      `INSERT INTO ${t} (id, qty, note) WITH RECURSIVE s (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < ${n}) SELECT i, i % 10, '${NOTE}' FROM s`,
+    // a recursive CTE stops at 1000 rows by default (cte_max_recursion_depth): cross join digits instead
+    fill: (t, n) => {
+      const digit = "(SELECT 0 AS i UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9)";
+      const nums = `SELECT a.i + 10 * b.i + 100 * c.i + 1000 * d.i + 1 AS i FROM ${digit} a, ${digit} b, ${digit} c, ${digit} d`;
+      return `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (${nums}) s WHERE i <= ${n}`;
+    },
     async writer(url) {
       const mysql = await loadDriver<typeof import("mysql2/promise")>("mysql2/promise", "MySQL");
       const c = await mysql.createConnection({ uri: url });
