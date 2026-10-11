@@ -76,6 +76,17 @@ describe("xlsx writer", () => {
     expect(book.sheet("").name).toBe("Sheet");
   });
 
+  it("writes whole numbers of 12 digits or more as text, as Excel would show them as 4.90123E+12", async () => {
+    const book = new Workbook();
+    book.sheet("s").add(4901234567894, -123456789012, 99999999999, 493.8, 1234567.891);
+    const xml = text(unzip(await book.toBuffer()), "xl/worksheets/sheet1.xml");
+    expect(xml).toContain('<t xml:space="preserve">4901234567894</t>');
+    expect(xml).toContain('<t xml:space="preserve">-123456789012</t>');
+    expect(xml).toContain("<v>99999999999</v>");
+    expect(xml).toContain("<v>493.8</v>");
+    expect(xml).toContain("<v>1234567.891</v>");
+  });
+
   it("anchors pictures below the rows before them and reserves the rows they cover", async () => {
     const book = new Workbook();
     const sheet = book.sheet("s");

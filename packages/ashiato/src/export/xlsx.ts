@@ -300,8 +300,11 @@ function sheetXml(sheet: Sheet, selected: boolean, drawing: boolean): Buffer {
 function cellXml(ref: string, v: CellValue, s: string): string {
   if (v === null || v === undefined) return `<c r="${ref}"${s}/>`;
   if (typeof v === "boolean") return `<c r="${ref}"${s} t="b"><v>${v ? 1 : 0}</v></c>`;
-  // Excel keeps 15 significant digits: longer numbers (IDs) would be shown rounded, so they go in as text
-  if (typeof v === "number" && Number.isFinite(v) && significantDigits(v) <= 15) return `<c r="${ref}"${s}><v>${v}</v></c>`;
+  // Excel keeps 15 significant digits: longer numbers (IDs) would be shown rounded, so they go in as text.
+  // So do whole numbers of 12 digits or more (a JAN code), which Excel shows as 4.90123E+12.
+  if (typeof v === "number" && Number.isFinite(v) && significantDigits(v) <= 15 && !(Number.isInteger(v) && Math.abs(v) >= 1e11)) {
+    return `<c r="${ref}"${s}><v>${v}</v></c>`;
+  }
   return `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${cellText(String(v))}</t></is></c>`;
 }
 

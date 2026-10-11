@@ -57,7 +57,9 @@ export default defineConfig({
 - **What is tracked:** `fetch`, `XMLHttpRequest` (axios), and WebView2 `window.chrome.webview.postMessage` with JSON-RPC style `{ id, method }` → `{ id, result | error }` replies (webview2-bridge works as is). A WinForms / WPF host that loads the Vite dev server URL gets the same tracking. Synchronous XHR (`open(method, url, false)`) and `chrome.webview.postMessageWithAdditionalObjects` are not tracked.
 - **One checkpoint per action:** requests that start within 1s of a click, and requests chained after them, belong to that click. The checkpoint is taken 150ms after the last one finishes. A poller that sends requests less than `settleMs` apart keeps an action open until `maxRequestMs`, so add fast-polling endpoints to `ignore`.
 - **Outside changes are kept apart:** right before an action's first request is sent, ashiato takes a quick checkpoint. Anything another user or a batch job changed shows up as an `outside actions` step instead of being blamed on your click. (The request waits for that read; turn it off with `syncBefore: false`.)
-- Requests with no click (page load, polling) are recorded only when they changed something. Clicks that send nothing are not recorded.
+- **Overlapping actions become one step:** when a click's requests run at the same time as another click's requests that change data (a double click), their changes can't be told apart. They are recorded as one step, named after the first click that changed data, listing every request.
+- **A slow database doesn't put two clicks together:** a click's requests wait as long as the previous click's requests waited for their quick checkpoint, so they stay as far apart as you clicked them, and then for the previous click's checkpoint. Where a checkpoint takes about a second, requests can wait a second or two; watching fewer tables (`--tables`) makes checkpoints faster. A checkpoint you take in the terminal (Enter) while requests are waiting gets part of their changes: press Enter once the last step has shown up.
+- Requests with no click that change data (anything but `GET` / `HEAD`) are recorded only when they changed something. Requests with no click that only read (page load, polling) take no checkpoint at all; if one did change something, it shows up in the next step as `outside actions`. Clicks that send nothing are not recorded.
 
 | Option | Default | |
 | --- | --- | --- |
@@ -241,7 +243,9 @@ export default defineConfig({
 - **追跡するもの**:`fetch`、`XMLHttpRequest`(axios)、WebView2 の `window.chrome.webview.postMessage`(JSON-RPC 形式 `{ id, method }` → `{ id, result | error }`。webview2-bridge はそのまま使えます)。同期 XHR(`open(method, url, false)`)と `chrome.webview.postMessageWithAdditionalObjects` は追跡しません
 - **操作ごとに1つ**:クリックから1秒以内に始まった通信と、それに続く通信をそのクリックにまとめ、最後の通信が終わってから150ms後に記録します。`settleMs` より短い間隔で通信するポーリングがあると、操作が `maxRequestMs` まで終わらないため、そのURLは `ignore` に指定してください
 - **操作外の変更は分ける**:操作の最初の通信を送る直前に一度記録します。他の人やバッチによる変更は「outside actions」として別に表示し、あなたの操作のせいにはしません
-- クリックを伴わない通信(画面表示時、ポーリング)は、変更があったときだけ記録します。通信のないクリックは記録しません
+- **重なった操作は1つにまとめる**:データを変える通信と次のクリックの通信が同時に動くと(ダブルクリックなど)、どちらの変更かを区別できません。データを変えた最初のクリックの名前で1つのステップにまとめ、すべての通信を一覧に出します
+- **DBが遅くても別々のクリックはまとめない**:クリックの通信は、前のクリックの通信が記録を待ったのと同じ時間だけ待ってから(クリックした間隔を保ったまま)、前のクリックの記録が終わるのを待って送ります。1回の記録に1秒ほどかかるDBでは、通信が1〜2秒待つことがあります。監視するテーブルを絞る(`--tables`)と速くなります。通信が待っている間にターミナルで Enter を押すと、その変更の一部がそのステップに入ります。直前のステップが表示されてから押してください
+- クリックを伴わない通信のうちデータを変えうるもの(`GET` / `HEAD` 以外)は、変更があったときだけ記録します。読むだけの通信(画面表示時、ポーリング)では記録しません。それでも何か変わっていた場合は、次のステップで「outside actions」として表示します。通信のないクリックは記録しません
 
 | オプション | 既定値 | |
 | --- | --- | --- |

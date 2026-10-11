@@ -1,4 +1,4 @@
-import { normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
@@ -14,6 +14,8 @@ const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
  * (pg parses it as floats, while plain numeric already stays text).
  */
 const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807, 1231]);
+/** bigint and numeric, which pg hands over as text: a number when exact, like the other databases' adapters. */
+const EXACT_TYPES = new Set([20, 1700]);
 
 export async function connectPostgres(url: URL): Promise<DbAdapter> {
   const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
@@ -24,7 +26,7 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
     idleTimeoutMillis: 0,
     types: {
       getTypeParser: ((oid: number, format?: "text" | "binary") =>
-        RAW_TYPES.has(oid) ? (v: string) => v : pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
+        RAW_TYPES.has(oid) ? (v: string) => v : EXACT_TYPES.has(oid) ? exactDecimal : pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
     },
   });
   // Without a listener, an idle connection being closed by the server would crash the process.

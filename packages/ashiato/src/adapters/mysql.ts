@@ -1,4 +1,4 @@
-import { normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
@@ -6,6 +6,8 @@ import type { DbAdapter } from "./types.js";
 
 const q = (id: string) => `\`${id.replace(/`/g, "``")}\``;
 const name = (t: TableRef) => (t.schema ? `${q(t.schema)}.${q(t.name)}` : q(t.name));
+/** Column type of DECIMAL / NUMERIC in result metadata (MYSQL_TYPE_NEWDECIMAL). */
+const DECIMAL = 246;
 
 /** mysql://user:password@host:3306/database — also works for MariaDB. */
 export async function connectMysql(url: URL): Promise<DbAdapter> {
@@ -15,16 +17,24 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
     connectionLimit: 1,
     enableKeepAlive: true,
     dateStrings: true,
+    // BIGINT as a number when exact, as text otherwise
     supportBigNumbers: true,
-    bigNumberStrings: true,
+    bigNumberStrings: false,
   });
+  const run = async (sql: string, params: unknown[]) => {
+    const [rows, fields] = (await pool.query(sql, params)) as unknown as [Record<string, unknown>[], { name: string; columnType: number }[]?];
+    // DECIMAL comes as text: a number when exact, like the other databases' adapters
+    const decimals = (fields ?? []).filter((f) => f.columnType === DECIMAL).map((f) => f.name);
+    if (decimals.length) for (const r of rows) for (const c of decimals) r[c] = exactDecimal(r[c]);
+    return rows;
+  };
   const query = async (sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> => {
     try {
-      return (await pool.query(sql, params))[0] as Record<string, unknown>[];
+      return await run(sql, params);
     } catch (e) {
       // the server closed the connection (wait_timeout, restart): the pool opens a new one
       if (!(e as { fatal?: boolean }).fatal) throw e;
-      return (await pool.query(sql, params))[0] as Record<string, unknown>[];
+      return await run(sql, params);
     }
   };
   await query("SELECT 1");

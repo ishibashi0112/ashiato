@@ -241,6 +241,11 @@ for (const [dialect, d] of Object.entries(dialects)) {
         expect(changed).toEqual(d.addMicrosecond ? ["amount", "big", "doc", "ts"] : ["amount", "big", "doc"]);
         expect(lower(exact.diff.tables[0]?.updated[0]?.after)).toMatchObject({ big: "9007199254740995", amount: "1.000000000000000002" });
 
+        // integers and decimals that a number holds exactly read the same on every database
+        await w.run("UPDATE ashiato_stock SET big = 42, amount = 493.80");
+        const plain = await recorder.checkpoint("plain numbers");
+        expect(lower(plain.diff.tables[0]?.updated[0]?.after)).toMatchObject({ big: 42, amount: 493.8 });
+
         // nothing changed: nothing reported
         expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
 

@@ -35,6 +35,7 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
 
   // tedious reads DECIMAL / NUMERIC and MONEY as floating point numbers, which rounds values with
   // more than 15 significant digits: such columns are read as text (money with all four decimals).
+  // BIGINT comes as text. Both are then a number when exact, like the other databases' adapters.
   const columnLists = new Map<string, Promise<{ select: (alias?: string) => string; exact: string[] }>>();
   const columnsOf = (t: TableRef) => {
     let c = columnLists.get(name(t));
@@ -46,8 +47,8 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
         { t: name(t) },
       ).then((cols) => {
         const wide = (c: Record<string, unknown>) => c.type === "money" || (/^(decimal|numeric)$/.test(String(c.type)) && Number(c.precision) > 15);
-        const exact = cols.filter(wide).map((c) => String(c.name));
-        if (exact.length === 0) return { select: (alias?: string) => (alias ? `${alias}.*` : "*"), exact };
+        const exact = cols.filter((c) => wide(c) || c.type === "bigint").map((c) => String(c.name));
+        if (!cols.some(wide)) return { select: (alias?: string) => (alias ? `${alias}.*` : "*"), exact };
         const select = (alias?: string) =>
           cols
             .map((c) => {
