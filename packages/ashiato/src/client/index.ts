@@ -44,7 +44,14 @@ function install(win: Window & typeof globalThis): void {
   const post = async (path: string, body: string, keepalive = false) => {
     if (Date.now() < downUntil) return;
     try {
-      const res = await originalFetch(`${recorder}${path}`, { method: "POST", headers: { "content-type": "text/plain" }, body, keepalive });
+      const res = await originalFetch(`${recorder}${path}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body,
+        keepalive,
+        // a recorder that accepts the connection but never answers counts as down, instead of holding up every later checkpoint
+        signal: AbortSignal.timeout(120_000),
+      });
       if (!res.ok) console.warn(`[ashiato] recorder answered HTTP ${res.status} for ${path}: ${await res.text()}`);
     } catch (e) {
       downUntil = Date.now() + RETRY_MS;
