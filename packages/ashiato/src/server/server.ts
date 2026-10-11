@@ -178,7 +178,8 @@ function serveRange(req: IncomingMessage, res: ServerResponse, file: { path: str
   if (file.size === 0) return void res.writeHead(200, { ...headers, "Content-Length": 0 }).end();
   if (!range || (!range[1] && !range[2])) {
     res.writeHead(200, { ...headers, "Content-Length": file.size });
-    return stream(file.path, res);
+    // the file may grow while it is sent (replay batches, a recording in progress): send the size announced
+    return stream(file.path, res, { start: 0, end: file.size - 1 });
   }
   // "bytes=500-" (from 500), "bytes=500-999", or "bytes=-500" (the last 500)
   let start = range[1] ? Number(range[1]) : file.size - Number(range[2]);
@@ -194,7 +195,7 @@ function serveRange(req: IncomingMessage, res: ServerResponse, file: { path: str
 }
 
 /** Unlike `.pipe()`, closes the file when the browser goes away mid-transfer (a <video> seeking does so all the time). */
-function stream(path: string, res: ServerResponse, range?: { start: number; end: number }) {
+function stream(path: string, res: ServerResponse, range: { start: number; end: number }) {
   pipeline(createReadStream(path, range), res, () => undefined);
 }
 

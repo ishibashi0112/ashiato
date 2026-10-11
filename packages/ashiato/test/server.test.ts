@@ -1,5 +1,5 @@
 import { mkdtempSync, readdirSync } from "node:fs";
-import { request } from "node:http";
+import { Agent, request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,6 +156,41 @@ describe("server", () => {
     expect(await tail.text()).toBe("789");
     expect((await fetch(`${base}/api/video/1`, { headers: { range: "bytes=20-" } })).status).toBe(416);
     expect((await fetch(`${base}/api/video/9`)).status).toBe(404);
+  });
+
+  it("sends no more than the size it announced while the file grows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-srv-"));
+    const session: Session = { version: 1, id: "x", startedAt: "t", dialect: "sqlite", tables: [], steps: [] };
+    const media = new MediaStore(join(dir, "s.json"), session);
+    const video = media.startVideo("video/webm", "2026-10-11T00:00:00.000Z");
+    media.appendVideo(video.id, Buffer.alloc(8 * 1024 * 1024, 1));
+    const server = await startServer({ port: 0, getSession: () => session, media });
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const port = (server.address() as AddressInfo).port;
+    const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+    cleanups.push(async () => agent.destroy());
+    // the recording goes on while the whole file is downloaded
+    const length = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path: `/api/video/${video.id}`, agent }, (res) => {
+        let size = 0;
+        res.once("data", () => media.appendVideo(video.id, Buffer.alloc(1024 * 1024, 2)));
+        res.on("data", (c: Buffer) => (size += c.length));
+        res.on("end", () => resolve(size));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    expect(length).toBe(8 * 1024 * 1024);
+    // the next request on the same connection reads a clean response
+    const next = await new Promise<number>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path: "/api/session", agent }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode!));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    expect(next).toBe(200);
   });
 
   it.skipIf(process.platform !== "linux")("closes files when the browser stops reading them", async () => {
