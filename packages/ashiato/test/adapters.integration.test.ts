@@ -230,10 +230,12 @@ for (const [dialect, d] of Object.entries(dialects)) {
     it("re-reads only the part of a large table that changed", async () => {
       const w = await d.writer(url!);
       const t = "ashiato_big";
-      await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+      const log = "ashiato_log"; // no primary key, empty at first: one bucket, no GROUP BY
+      for (const x of [t, log]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
       await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT, note VARCHAR(100)${d.extraColumn ? `, ${d.extraColumn}` : ""})`);
+      await w.run(`CREATE TABLE ${log} (msg VARCHAR(20))`);
       await w.run(d.fill(t, 2000));
-      const db = await connect(await w.readOnlyUrl([t]));
+      const db = await connect(await w.readOnlyUrl([t, log]));
       const read = db.readBuckets!.bind(db);
       const reads: { which?: number[]; rows: number }[] = [];
       db.readBuckets = async (table, key, n, which) => {
@@ -246,16 +248,24 @@ for (const [dialect, d] of Object.entries(dialects)) {
         return { id: Number(id), qty: Number(qty), note };
       };
       try {
-        const recorder = new Recorder(db, { tables: [t], rowsPerBucket: 20 });
+        const recorder = new Recorder(db, { tables: [t, log], rowsPerBucket: 20 });
         await recorder.start();
         expect(recorder.fullReadTables()).toEqual([]);
-        expect(reads).toEqual([{ which: undefined, rows: 2000 }]);
+        expect(reads).toEqual([
+          { which: undefined, rows: 2000 },
+          { which: undefined, rows: 0 },
+        ]);
 
         // the database's sums match the ones computed from the rows read: nothing is read again
         reads.length = 0;
         expect((await recorder.checkpoint("idle")).diff.tables).toEqual([]);
         expect(reads).toEqual([]);
 
+        await w.run(`INSERT INTO ${log} (msg) VALUES ('saved')`);
+        const logged = await recorder.checkpoint("log");
+        expect(logged.diff.tables.map((x) => x.inserted.map(lower))).toEqual([[{ msg: "saved" }]]);
+
+        reads.length = 0;
         await w.run(`UPDATE ${t} SET qty = 99 WHERE id = 1234`);
         const upd = await recorder.checkpoint("update");
         expect(upd.diff.tables).toHaveLength(1);
@@ -279,7 +289,7 @@ for (const [dialect, d] of Object.entries(dialects)) {
         expect(reads).toEqual([]);
       } finally {
         await db.close();
-        await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+        for (const x of [t, log]) await w.run(`DROP TABLE ${x}`).catch(() => undefined);
         await w.close();
       }
     }, 60_000);

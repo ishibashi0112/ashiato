@@ -1,6 +1,6 @@
 import { normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
-import { ALIAS, BUCKET, SIG, bucketList, toBucketedRow, toSums } from "./buckets.js";
+import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -83,7 +83,7 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
     async bucketSums(t, key, n) {
       const b = bucketOf(key, n);
       return toSums(
-        await query(`SELECT ${b} AS b, count(*) AS n, sum(${ALIAS}.xmin::text::bigint)::text AS s FROM ${from(t)} AS ${ALIAS} GROUP BY 1`),
+        await query(`SELECT ${b} AS b, count(*) AS n, sum(${ALIAS}.xmin::text::bigint)::text AS s FROM ${from(t)} AS ${ALIAS}${groupBy(b)}`),
       );
     },
     async readBuckets(t, key, n, which) {

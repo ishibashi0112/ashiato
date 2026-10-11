@@ -1,6 +1,6 @@
 import { normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
-import { ALIAS, BUCKET, SIG, bucketList, toBucketedRow, toSums } from "./buckets.js";
+import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -91,7 +91,7 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
       const b = bucketOf(key, n);
       const { from, sig } = await signed(t);
       return toSums(
-        await query(`SELECT ${b} AS b, COUNT_BIG(*) AS n, CAST(SUM(CAST(${sig} AS DECIMAL(38, 0))) AS VARCHAR(40)) AS s FROM ${from} GROUP BY ${b}`),
+        await query(`SELECT ${b} AS b, COUNT_BIG(*) AS n, CAST(SUM(CAST(${sig} AS DECIMAL(38, 0))) AS VARCHAR(40)) AS s FROM ${from}${groupBy(b)}`),
       );
     },
     async readBuckets(t, key, n, which) {

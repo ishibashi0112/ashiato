@@ -17,9 +17,19 @@ export function toBucketedRow(raw: Record<string, unknown>): BucketedRow {
   return { bucket: Number(bucket), sig: String(sig), row: normalizeRow(row) };
 }
 
+/**
+ * GROUP BY clause for a bucket expression. A single bucket is a plain aggregate instead: SQL Server
+ * refuses to group by a constant.
+ */
+export function groupBy(bucket: string): string {
+  return bucket === "0" ? "" : ` GROUP BY ${bucket}`;
+}
+
 /** `bucketSums` query rows with columns b (bucket), n (row count) and s (signature sum as text). */
 export function toSums(rows: Record<string, unknown>[]): Map<number, BucketSum> {
-  return new Map(rows.map((r) => [Number(r.b), { count: Number(r.n), sum: BigInt(String(r.s).trim()) }]));
+  // an aggregate without GROUP BY returns one row (n = 0, s = NULL) for an empty table
+  const filled = rows.filter((r) => Number(r.n) > 0);
+  return new Map(filled.map((r) => [Number(r.b), { count: Number(r.n), sum: BigInt(String(r.s).trim()) }]));
 }
 
 /** `IN (...)` list of bucket numbers. */

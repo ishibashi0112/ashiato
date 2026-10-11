@@ -1,6 +1,6 @@
 import { normalizeRow } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
-import { ALIAS, BUCKET, SIG, bucketList, toBucketedRow, toSums } from "./buckets.js";
+import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter } from "./types.js";
 
@@ -108,7 +108,7 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
     },
     async bucketSums(t, key, n) {
       const b = bucketOf(key, n);
-      return toSums(await exec(`SELECT ${b} AS "b", COUNT(*) AS "n", TO_CHAR(SUM(ORA_ROWSCN)) AS "s" FROM ${name(t)} ${ALIAS} GROUP BY ${b}`));
+      return toSums(await exec(`SELECT ${b} AS "b", COUNT(*) AS "n", TO_CHAR(SUM(ORA_ROWSCN)) AS "s" FROM ${name(t)} ${ALIAS}${groupBy(b)}`));
     },
     async readBuckets(t, key, n, which) {
       const b = bucketOf(key, n);
