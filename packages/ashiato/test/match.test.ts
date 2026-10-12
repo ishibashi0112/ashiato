@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Diff, TableDiff } from "../src/core/types.js";
-import { checkExpectation, matchChanges, valueMatches, type ExpectedChanges, type WatchedTable } from "../src/testing/match.js";
+import type { Expect } from "@playwright/test";
+import { checkExpectation, matchChanges, tableProblems, valueMatches, type ExpectedChanges, type WatchedTable } from "../src/testing/match.js";
 
 const orders: TableDiff = {
   table: { schema: "dbo", name: "orders" },
@@ -64,6 +65,15 @@ describe("matchChanges", () => {
 
     const [extra] = problems(diff(orders), { orders: { inserted: [{ customer_id: 7 }] } });
     expect(extra).toMatch(/1 inserted row expected, 2 found\n {4}not expected:\n {6}\+ \{ id: 1043/);
+
+    // a row two patterns fit: the second isn't shown a "closest" row that fits it
+    const [twice] = problems(diff(orders), { orders: { inserted: [{ customer_id: 7 }, { qty: 10 }] } });
+    expect(twice).toContain("expected { qty: 10 }: the rows it fits are taken by the other rows expected");
+    expect(twice).toContain("not expected:\n      + { id: 1043");
+    // with as many rows as expected, every row not expected is shown
+    const [both] = problems(diff(orders), { orders: { inserted: [{ customer_id: 9 }, { customer_id: 10 }] } });
+    expect(both).toContain("closest: + { id: 1042");
+    expect(both).toContain("not expected:\n      + { id: 1043");
   });
 
   it("requires every changed column in set, and where to pick the row", () => {
@@ -83,6 +93,10 @@ describe("matchChanges", () => {
       "dbo.orders can't be compared: it has 200000 rows (more than maxRows)",
     ]);
     expect(problems(diff(), { orders: {}, "dbo.orders": {} })).toEqual(['"dbo.orders" names dbo.orders, which the expectation already lists under another name']);
+
+    // known before the action: everything but a name that fits no table yet
+    expect(tableProblems({ t: {}, order: {} }, two)).toEqual(['"t" is ambiguous: a.t, b.t. Use schema.name']);
+    expect(tableProblems({ orders: {}, "dbo.orders": {} }, watched)).toEqual(['"dbo.orders" names dbo.orders, which the expectation already lists as "orders"']);
   });
 
   it("names a column the rows don't have", () => {
@@ -102,12 +116,29 @@ describe("valueMatches", () => {
     expect(valueMatches(null, null)).toBe(true);
     expect(valueMatches(null, 0)).toBe(false);
     expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11T00:00:00.000Z")).toBe(true);
+    // without a time zone: UTC, on any machine
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11 00:00:00")).toBe(true);
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11 00:00:00.000000")).toBe(true);
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11")).toBe(true);
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11 09:00:00+09")).toBe(true);
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11 09:00:00+0900")).toBe(true);
+    expect(valueMatches(new Date("2026-10-11T00:00:00Z"), "2026-10-11 00:00:01")).toBe(false);
+    // MySQL BIT(1) is read as bytes, PostgreSQL bit(1) as text
+    expect(valueMatches(true, "0x01")).toBe(true);
+    expect(valueMatches(false, "0x00")).toBe(true);
+    expect(valueMatches(true, "1")).toBe(true);
+    expect(valueMatches(false, "0x01")).toBe(false);
     expect(valueMatches(/^ord-\d+$/g, "ord-12")).toBe(true);
     expect(valueMatches(/^ord-\d+$/g, "ord-12")).toBe(true); // lastIndex of a global RegExp doesn't carry over
     expect(valueMatches((v) => typeof v === "number" && v > 3, 4)).toBe(true);
     expect(valueMatches(expect.stringContaining("ab"), "xaby")).toBe(true);
   });
 });
+
+// Playwright types its matchers as Record<string, any>: they must fit where values go (checked by tsc)
+export function playwrightMatchersFit(e: Expect<object>): ExpectedChanges {
+  return { orders: { inserted: [{ id: e.any(Number), note: e.stringContaining("x") }], updated: [{ where: { id: 1 }, set: { at: e.anything() } }] } };
+}
 
 describe("checkExpectation", () => {
   it("rejects shapes that can't be meant", () => {

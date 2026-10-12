@@ -131,10 +131,10 @@ test("placing an order", async ({ page, expectDbChanges }) => {
 
 - It reads the watched tables before the action, runs it, then waits until the changes stop for `settleMs` (300 ms) and match, for up to `timeout` (5 s).
 - Every table listed must change exactly as described, and **no other watched table may change**. `{}` checks that nothing changed; `orders: {}` that `orders` didn't.
-- `inserted` / `deleted` are rows or a count (`inserted: 300`). `updated` rows are `{ where, set }`: `where` picks the row, and `set` lists every column the update changed (leave columns like `updated_at`, and SQL Server `rowversion` columns, to `ignoreColumns`). Only the columns you give are compared, names in any case, and Playwright's `expect.any()`, `expect.stringContaining()` and the like work in them.
+- `inserted` / `deleted` are rows or a count (`inserted: 300`). `updated` rows are `{ where, set }`: `where` picks the row, and `set` lists every column the update changed (leave columns like `updated_at`, and SQL Server `rowversion` columns, to `ignoreColumns`). Only the columns you give are compared, names in any case, and Playwright's `expect.any()`, `expect.stringContaining()` and the like work in them. A `Date` matches the same moment; times the database gives without a time zone are read as UTC, so a test passes the same on every machine.
 - When it fails, the error says which rows and columns differ, lists changes the expectation doesn't mention, and shows everything that changed. It points at your test's line, as a step named `expect database changes: orders +1, stock ~1`.
 - Run tests that check the same database one at a time (`--workers=1`): parallel tests would see each other's writes.
-- Options (`test.use({ ashiato })`, or per call as the third argument): `db`, `tables`, `ignoreColumns`, `maxRows`, `timeout`, `settleMs`.
+- Options (`test.use({ ashiato })`): `db`, `tables`, `ignoreColumns`, `maxRows`, `timeout`, `settleMs`. Per call, as the third argument: `timeout`, `settleMs`.
 - Without Playwright: `import { watchDb } from "ashiato"`, then `await watchDb(url).expectChanges(action, expected)`.
 
 ## Tests from a recording
@@ -406,10 +406,10 @@ test("注文する", async ({ page, expectDbChanges }) => {
 
 - 操作の前に対象テーブルを読み、操作を実行してから、変更が `settleMs`(300ミリ秒)止まって期待と合うまで、最大 `timeout`(5秒)待ちます
 - 書いたテーブルはすべて書いたとおりに変わる必要があり、**書いていない対象テーブルが変わると失敗**します。`{}` は「何も変わらない」、`orders: {}` は「orders は変わらない」を確かめます
-- `inserted` / `deleted` は行のリストか件数(`inserted: 300`)、`updated` は `{ where, set }` のリストです。`where` で行を選び、`set` にはその更新で変わった列をすべて書きます(`updated_at` のような列や SQL Server の `rowversion` 列は `ignoreColumns` に)。書いた列だけを比べ(列名の大文字・小文字は問いません)、Playwright の `expect.any()` や `expect.stringContaining()` なども使えます
+- `inserted` / `deleted` は行のリストか件数(`inserted: 300`)、`updated` は `{ where, set }` のリストです。`where` で行を選び、`set` にはその更新で変わった列をすべて書きます(`updated_at` のような列や SQL Server の `rowversion` 列は `ignoreColumns` に)。書いた列だけを比べ(列名の大文字・小文字は問いません)、Playwright の `expect.any()` や `expect.stringContaining()` なども使えます。`Date` は同じ時刻かを比べます。DB がタイムゾーンなしで返す時刻は UTC として読むので、どのマシンでも同じ結果になります
 - 失敗すると、どの行のどの列が違うか、期待にない変更、実際に変わったものすべてをエラーに出します。エラーはテスト自身の行を指し、レポートには `expect database changes: orders +1, stock ~1` というステップで表示されます
 - 同じDBを確かめるテストは1つずつ実行してください(`--workers=1`)。並列だとお互いの書き込みが見えてしまいます
-- オプション(`test.use({ ashiato })`、または呼び出しごとに第3引数):`db`・`tables`・`ignoreColumns`・`maxRows`・`timeout`・`settleMs`
+- オプション(`test.use({ ashiato })`):`db`・`tables`・`ignoreColumns`・`maxRows`・`timeout`・`settleMs`。呼び出しごと(第3引数)には `timeout`・`settleMs`
 - Playwright なしでも使えます:`import { watchDb } from "ashiato"` して `await watchDb(url).expectChanges(操作, 期待)`
 
 ### 記録からテストを作る

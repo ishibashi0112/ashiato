@@ -3,7 +3,7 @@ import type { DbAdapter } from "../adapters/types.js";
 import { diffSnapshots, tableId } from "../core/diff.js";
 import { TableReader } from "../core/reader.js";
 import type { Diff, Snapshot } from "../core/types.js";
-import { checkExpectation, describeDiff, matchChanges, type DbChanges, type ExpectedChanges, type WatchedTable } from "./match.js";
+import { checkExpectation, describeDiff, matchChanges, tableProblems, type DbChanges, type ExpectedChanges, type WatchedTable } from "./match.js";
 
 export interface ExpectOptions {
   /** How long to wait for the expected changes after the action. Default 5000ms. */
@@ -62,7 +62,7 @@ export class DbWatcher {
   private last?: Snapshot;
   private starting?: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
-  private closed = false;
+  private closing?: Promise<void>;
 
   constructor(
     private readonly source: string | DbAdapter | undefined,
@@ -74,30 +74,43 @@ export class DbWatcher {
    * exactly as described, and no other watched table changed. Resolves to the changes found.
    */
   expectChanges(action: () => unknown, expected: ExpectedChanges, options: ExpectOptions = {}): Promise<DbChanges> {
-    checkExpectation(expected);
+    try {
+      if (this.closing) throw new Error("this database watcher is closed");
+      checkExpectation(expected);
+      checkOptions(options);
+    } catch (e) {
+      return Promise.reject(e);
+    }
     const run = this.queue.then(() => this.run(action, expected, options));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  /** Closes the connection (when this watcher opened it). */
-  async close(): Promise<void> {
-    this.closed = true;
-    await this.queue;
-    await this.starting?.catch(() => undefined);
-    if (typeof this.source === "string" || this.source === undefined) await this.adapter?.close();
-    this.adapter = undefined;
+  /** Closes the connection (when this watcher opened it), once the calls made before have finished. */
+  close(): Promise<void> {
+    this.closing ??= (async () => {
+      await this.queue;
+      await this.starting?.catch(() => undefined);
+      if (typeof this.source === "string" || this.source === undefined) await this.adapter?.close();
+      this.adapter = undefined;
+    })();
+    return this.closing;
   }
 
   private start(): Promise<void> {
-    if (this.closed) return Promise.reject(new Error("this database watcher is closed"));
     this.starting ??= (async () => {
       const source = this.source ?? process.env.ASHIATO_DB_URL;
       if (!source) throw new Error("No database to watch: pass a connection URL or set ASHIATO_DB_URL");
       const db = typeof source === "string" ? await connect(source) : source;
-      this.adapter = db;
       const reader = new TableReader(db, this.options);
-      this.last = await reader.start();
+      try {
+        this.last = await reader.start();
+      } catch (e) {
+        // the next call connects again: don't leave this connection open
+        if (db !== source) await db.close().catch(() => undefined);
+        throw e;
+      }
+      this.adapter = db;
       this.reader = reader;
     })();
     // a failed connection is tried again by the next call
@@ -111,10 +124,9 @@ export class DbWatcher {
     const reader = this.reader!;
     const baseline = (await reader.read(this.last!)).snapshot;
     this.last = baseline;
-    // a listed table that can't be read now won't be readable a moment later: say so before acting
-    const before = matchChanges({ from: "", to: "", tables: [] }, expected, watchedIn(baseline, baseline));
-    const unreadable = before.ok ? [] : before.problems.filter((p) => / can't be compared: /.test(p));
-    if (unreadable.length) throw new Error(unreadable.join("\n"));
+    // a listed table that can't be read now, or a name that fits two tables, won't be right a moment later: say so before acting
+    const problems = tableProblems(expected, watchedIn(baseline, baseline));
+    if (problems.length) throw new Error(problems.join("\n"));
 
     await action();
 
@@ -159,6 +171,15 @@ function watchedIn(baseline: Snapshot, now: Snapshot): WatchedTable[] {
     if (b?.skipped) return { table: t.table, skipped: `${why(b)} before the action` };
     return { table: t.table };
   });
+}
+
+const EXPECT_OPTIONS = ["timeout", "settleMs", "pollMs"];
+
+function checkOptions(options: unknown): void {
+  if (options === undefined) return;
+  if (typeof options !== "object" || options === null) throw new TypeError("options must be an object: { timeout, settleMs, pollMs }");
+  const other = Object.keys(options).filter((k) => !EXPECT_OPTIONS.includes(k));
+  if (other.length) throw new TypeError(`${other.join(", ")} can't be set per call, only for the watcher (test.use({ ashiato: { ... } }) or watchDb()). Per call: ${EXPECT_OPTIONS.join(", ")}`);
 }
 
 const defined = <T extends object>(o: T): Partial<T> => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;

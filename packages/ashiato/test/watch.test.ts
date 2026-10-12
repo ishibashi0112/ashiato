@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import { DbChangesError, watchDb, type DbWatcher } from "../src/testing/watch.js";
 import { FakeDb } from "./fakedb.js";
@@ -11,6 +11,25 @@ afterEach(async () => {
 });
 
 const later = (ms: number, fn: () => void) => () => void setTimeout(fn, ms);
+
+// counts the connections the watcher opens and closes
+const opened = vi.hoisted(() => ({ open: 0, closed: 0 }));
+vi.mock("../src/adapters/index.js", async (original) => {
+  const real = await original<typeof import("../src/adapters/index.js")>();
+  return {
+    ...real,
+    connect: async (url: string) => {
+      const db = await real.connect(url);
+      opened.open++;
+      const close = db.close.bind(db);
+      db.close = async () => {
+        opened.closed++;
+        await close();
+      };
+      return db;
+    },
+  };
+});
 
 describe("expectChanges", () => {
   it("waits for the action's changes and returns them", async () => {
@@ -84,7 +103,11 @@ describe("expectChanges", () => {
     db.create("big", ["id"], [{ id: 1 }, { id: 2 }]);
     watcher = watchDb(db, { maxRows: 1 });
     let ran = false;
-    expect(() => watcher!.expectChanges(() => (ran = true), { orders: { inserted: "1" } } as never)).toThrow(TypeError);
+    await expect(watcher.expectChanges(() => (ran = true), { orders: { inserted: "1" } } as never)).rejects.toThrow(TypeError);
+    await expect(watcher.expectChanges(() => (ran = true), {}, { ignoreColumns: ["x"] } as never)).rejects.toThrow(
+      "ignoreColumns can't be set per call, only for the watcher",
+    );
+    await expect(watcher.expectChanges(() => (ran = true), { orders: {}, ORDERS: {} })).rejects.toThrow('"ORDERS" names orders, which the expectation already lists as "orders"');
     await expect(watcher.expectChanges(() => (ran = true), { big: { inserted: 1 } })).rejects.toThrow(
       "big can't be compared: it has 2 rows (more than maxRows)",
     );
@@ -127,6 +150,23 @@ describe("expectChanges", () => {
     } finally {
       if (saved !== undefined) process.env.ASHIATO_DB_URL = saved;
     }
+  });
+
+  it("closes a connection whose start failed, and closes after the calls made before", async () => {
+    const { file } = createAppDb();
+    opened.open = opened.closed = 0;
+    const w = watchDb(`sqlite:${file}`, { tables: ["nope"], settleMs: 10 });
+    for (let i = 0; i < 3; i++) await expect(w.expectChanges(() => undefined, {})).rejects.toThrow("nope");
+    await w.close();
+    expect(opened).toEqual({ open: 3, closed: 3 });
+
+    const w2 = watchDb(`sqlite:${file}`, { settleMs: 10 });
+    const first = w2.expectChanges(() => undefined, {});
+    const closing = w2.close();
+    await expect(first).resolves.toEqual({});
+    await expect(w2.expectChanges(() => undefined, {})).rejects.toThrow("this database watcher is closed");
+    await Promise.all([closing, w2.close()]);
+    expect(opened).toEqual({ open: 4, closed: 4 });
   });
 
   it("leaves an adapter it was given open", async () => {

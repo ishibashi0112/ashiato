@@ -4,15 +4,17 @@ import type { Diff, JsonValue, Row, TableDiff, TableRef, UpdatedRow } from "../c
 
 /**
  * What a column's value must be: a value, a `RegExp` (tested against the value as text), a
- * function returning true for good values, a `Date` (the same moment), or an asymmetric matcher
- * of Playwright / Vitest / Jest such as `expect.any(Number)`.
+ * function returning true for good values, a `Date` (the same moment; a time without a time zone,
+ * as most databases give it, is read as UTC), or an asymmetric matcher of Playwright / Vitest / Jest
+ * such as `expect.any(Number)`.
  */
 export type ValueMatcher = JsonValue | bigint | Date | RegExp | ((value: JsonValue) => boolean) | AsymmetricMatcher;
 
-/** `expect.any(Number)`, `expect.stringMatching(/x/)`... */
-export interface AsymmetricMatcher {
-  asymmetricMatch(actual: unknown): boolean;
-}
+/**
+ * `expect.any(Number)`, `expect.stringMatching(/x/)`... Playwright types them as `Record<string, any>`;
+ * whether they have `asymmetricMatch` is checked when the expectation is.
+ */
+export type AsymmetricMatcher = { asymmetricMatch(actual: unknown): boolean } | Record<string, any>;
 
 /** Some of a row's columns and what their values must be. Other columns (and `undefined` ones) can hold anything. */
 export type RowPattern = Record<string, ValueMatcher | undefined>;
@@ -149,6 +151,28 @@ export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: Wat
   return problems.length ? { ok: false, problems } : { ok: true, changes };
 }
 
+/**
+ * What is wrong with the expectation's tables before anything happens: names that fit several tables,
+ * tables listed twice, and tables that can't be compared. (A name that fits no table is not: the
+ * action may create it.)
+ */
+export function tableProblems(expected: ExpectedChanges, watched: WatchedTable[]): string[] {
+  const problems: string[] = [];
+  const claimed = new Map<string, string>();
+  for (const name of Object.keys(expected)) {
+    const found = resolveTable(name, watched);
+    if (typeof found === "string") {
+      if (/ is ambiguous: /.test(found)) problems.push(found);
+      continue;
+    }
+    const id = tableId(found.table);
+    if (claimed.has(id)) problems.push(`"${name}" names ${id}, which the expectation already lists as "${claimed.get(id)}"`);
+    else if (found.skipped) problems.push(`${id} can't be compared: ${found.skipped}`);
+    claimed.set(id, name);
+  }
+  return problems;
+}
+
 function resolveTable(name: string, watched: WatchedTable[]): WatchedTable | string {
   const n = name.trim().toLowerCase();
   const exact = watched.filter((w) => tableId(w.table).toLowerCase() === n);
@@ -183,20 +207,30 @@ function matchKind(t: TableDiff, kind: Kind, expected: number | RowPattern[] | U
 
   const unmatchedRows = actual.filter((_, j) => !pairs.includes(j));
   const lines: string[] = [];
+  const shown = new Set<Row | UpdatedRow>();
   expected.forEach((p, i) => {
     if (pairs[i]! >= 0) return;
     const text = kind === "updated" ? describeUpdatePattern(p as UpdatePattern) : describePattern(p as RowPattern);
+    const mismatch = (row: Row | UpdatedRow) => (kind === "updated" ? updateMismatch(p as UpdatePattern, row as UpdatedRow) : rowMismatch(p as RowPattern, row as Row));
+    if (actual.some((row) => mismatch(row).length === 0)) {
+      lines.push(`expected ${text}: the rows it fits are taken by the other rows expected`);
+      return;
+    }
     lines.push(`expected ${text}: ${actual.length ? "no row matches" : "not found"}`);
     // the row it is closest to, to show what differs
     let best: { row: Row | UpdatedRow; why: string[] } | undefined;
     for (const row of unmatchedRows.length ? unmatchedRows : actual) {
-      const why = kind === "updated" ? updateMismatch(p as UpdatePattern, row as UpdatedRow) : rowMismatch(p as RowPattern, row as Row);
+      const why = mismatch(row);
       if (!best || why.length < best.why.length) best = { row, why };
     }
-    if (best) lines.push(`  closest: ${describeChange(t, kind, best.row)}`, ...best.why.map((w) => `    ${w}`));
+    if (best) {
+      shown.add(best.row);
+      lines.push(`  closest: ${describeChange(t, kind, best.row)}`, ...best.why.map((w) => `    ${w}`));
+    }
   });
-  // with as many rows as expected, the closest rows above are the ones not expected
-  if (unmatchedRows.length && expected.length !== actual.length) lines.push(`not expected:${show(unmatchedRows).replace(/\n {4}/g, "\n  ")}`);
+  // with as many rows as expected, the closest rows above are ones not expected: the rest are listed
+  const unexpected = expected.length === actual.length ? unmatchedRows.filter((r) => !shown.has(r)) : unmatchedRows;
+  if (unexpected.length) lines.push(`not expected:${show(unexpected).replace(/\n {4}/g, "\n  ")}`);
   const head = expected.length === actual.length ? `${rowsOf(actual.length)} found, but not the expected ones` : `${rowsOf(expected.length)} expected, ${actual.length} found`;
   return { rows: [], problems: [`${head}\n${indent(lines.join("\n"), 4)}`] };
 }
@@ -269,7 +303,7 @@ export function valueMatches(m: ValueMatcher, actual: JsonValue): boolean {
   if (typeof m === "function") return Boolean((m as (v: JsonValue) => boolean)(actual));
   if (m instanceof Date) {
     if (actual === null || typeof actual === "boolean") return false;
-    return Date.parse(String(actual)) === m.getTime();
+    return timeOf(String(actual)) === m.getTime();
   }
   if (m === null) return actual === null;
   switch (typeof m) {
@@ -281,10 +315,23 @@ export function valueMatches(m: ValueMatcher, actual: JsonValue): boolean {
     case "string":
       return actual === m || (typeof actual === "number" && /^-?(\d+\.?\d*|\.\d+)$/.test(m.trim()) && exactDecimal(m) === actual);
     case "boolean":
-      // BIT / NUMBER(1) / TINYINT(1) columns hold 1 and 0
-      return actual === m || actual === (m ? 1 : 0);
+      // BIT / NUMBER(1) / TINYINT(1) columns hold 1 and 0; MySQL's BIT(1) is read as bytes (0x01), PostgreSQL's bit(1) as "1"
+      return actual === m || (m ? [1, "1", "0x01"] : [0, "0", "0x00"]).includes(actual as never);
   }
   return false;
+}
+
+/**
+ * The moment a database's date or time text stands for. Text without a time zone is read as UTC
+ * (as SQL Server's values are), not in this machine's zone: the same test passes on every machine.
+ */
+function timeOf(text: string): number {
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}(?::?\d{2})?)?)?$/i.exec(text.trim());
+  if (!m) return Date.parse(text);
+  const [, date, time, zone] = m;
+  if (!time) return Date.parse(`${date}T00:00:00Z`);
+  const z = !zone ? "Z" : /^z$/i.test(zone) ? "Z" : zone.length === 3 ? `${zone}:00` : zone.includes(":") ? zone : `${zone.slice(0, 3)}:${zone.slice(3)}`;
+  return Date.parse(`${date}T${time}${z}`);
 }
 
 function isAsymmetric(m: unknown): m is AsymmetricMatcher {
