@@ -110,12 +110,13 @@ describe("tools for AI agents", () => {
     expect(started).toMatch(/^Recording 3 tables on sqlite: baseline taken\.\nSession file: .+\.json\nTimeline: http:\/\/127\.0\.0\.1:\d+/);
     await expect(c.call("start_recording")).rejects.toThrow("Already recording");
 
-    app.db.exec("INSERT INTO orders VALUES (1042, 7, 10, 'secret-note'); UPDATE stock SET qty = 40 WHERE item_id = 3");
+    // values that can't turn up in the step's time
+    app.db.exec("INSERT INTO orders VALUES (1042, 7, 10, 'secret-note'); UPDATE stock SET qty = 4711 WHERE item_id = 3");
     const step = await c.call("checkpoint", { label: "ran the import" });
     expect(step).toContain("#1 ran the import");
     expect(step).toContain("orders (key: id): 1 row inserted, 0 updated, 0 deleted\n    inserted rows have: id, customer_id, qty, updated_at");
     expect(step).toContain("stock (key: item_id): 0 rows inserted, 1 updated (qty), 0 deleted");
-    expect(step).not.toMatch(/1042|secret-note|40/);
+    expect(step).not.toMatch(/1042|secret-note|4711/);
 
     app.db.exec("DELETE FROM orders WHERE id = 1042");
     await c.call("checkpoint");
