@@ -159,9 +159,9 @@ test("recorded 2026-10-11 13:00", async ({ page, expectDbChanges }) => {
   ...
 ```
 
-- The clicks, typing, options picked, checkboxes, Enter presses and page loads come from the screen replay (the Vite plugin records it). Elements are found the way Playwright recommends: test id, role and name, label, placeholder, text, then an id or attribute, checked to be unique on the page at that moment.
+- The clicks, typing, options picked, checkboxes, Enter presses and page loads come from the screen replay (the Vite plugin records it), and so does text typed in an editable area (`contenteditable`). Elements are found the way Playwright recommends: test id, role and name, label, placeholder, text, then an id or attribute, checked to be unique on the page at that moment. A name whose spaces depend on the stylesheet (`<span>Order</span><span>list</span>` in a flex box) is matched with a pattern: `/^Order ?list$/`.
 - Answers to `alert` / `confirm` / `prompt` are given back the same way (`page.once("dialog", ...)`).
-- Values the database makes up are matched with `expect.any()`: keys of new rows, columns referring to them (`order_id`), UUIDs in new rows, SQL Server row versions, and dates near the time of the recording. Steps with more than 20 rows of a kind are checked by count.
+- Values the database makes up are matched with `expect.any()`: keys of new rows, columns referring to them (`order_id`), UUIDs in new rows, SQL Server row versions, and dates near the time of the recording. Columns named like a password, hash, salt, token or secret are matched with `expect.any(String)` too, so their values aren't copied into the test. Steps with more than 20 rows of a kind are checked by count.
 - Before running it, put the database back in the state it was in when recording started, and set `ASHIATO_DB_URL`. Steps sent through WebView2 need the page hosted by your desktop app (or a stand-in for `chrome.webview`). Without a screen replay, the actions are left as `TODO`s.
 - Typed passwords and masked inputs (`maskAllInputs`) are not in the replay: they become `TODO`s.
 
@@ -422,9 +422,9 @@ test("注文する", async ({ page, expectDbChanges }) => {
 npx ashiato codegen .ashiato/sessions/2026-10-11T04-00-00-000Z.json   # 隣に ...000Z.spec.ts を書き出します
 ```
 
-- クリック・入力・選択・チェック・Enter・ページ移動は、画面リプレイ(Viteプラグインが記録)から取り出します。要素は Playwright 推奨の順(テストID → ロールと名前 → ラベル → プレースホルダ → テキスト → id や属性)で、その時点のページで1つに決まるものを使います
+- クリック・入力・選択・チェック・Enter・ページ移動は、画面リプレイ(Viteプラグインが記録)から取り出します。編集できる領域(`contenteditable`)への入力も同じです。要素は Playwright 推奨の順(テストID → ロールと名前 → ラベル → プレースホルダ → テキスト → id や属性)で、その時点のページで1つに決まるものを使います。スタイルシートで空白が入るかが決まる名前(flex の中の `<span>受注</span><span>一覧</span>` など)は `/^受注 ?一覧$/` のようなパターンで探します
 - `alert` / `confirm` / `prompt` には、記録時と同じ応答を返します(`page.once("dialog", ...)`)
-- DB が決める値は `expect.any()` で比べます:新しい行のキー、それを参照する列(`order_id` など)、新しい行の UUID、SQL Server の行バージョン、記録時刻付近の日時です。1つの種類で20行を超えるステップは件数で確かめます
+- DB が決める値は `expect.any()` で比べます:新しい行のキー、それを参照する列(`order_id` など)、新しい行の UUID、SQL Server の行バージョン、記録時刻付近の日時です。パスワード・ハッシュ・ソルト・トークン・シークレットらしい名前の列も、値をテストに書き写さず `expect.any(String)` にします。1つの種類で20行を超えるステップは件数で確かめます
 - 実行する前に、DB を記録開始時の状態に戻し、`ASHIATO_DB_URL` を設定してください。WebView2 経由のステップは、ページをデスクトップアプリ(または `chrome.webview` の代役)の中で動かす必要があります。画面リプレイがない場合、操作は `TODO` になります
 - パスワードと伏せ字にした入力(`maskAllInputs`)はリプレイにないので `TODO` になります
 
