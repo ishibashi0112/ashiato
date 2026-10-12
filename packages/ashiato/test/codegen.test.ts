@@ -353,6 +353,19 @@ describe("generated Playwright tests", () => {
 `);
   });
 
+  it("matches SQL Server row versions with expect.any()", () => {
+    const s = { ...sessionOf([step(1, 0, { label: "save", diff: diffOf({ table: stock, key: ["item"], updated: [{ key: { item: 3 }, before: { item: 3, qty: 1, rv: "0x00000000000007d3" }, after: { item: 3, qty: 2, rv: "0x00000000000007ea" }, changed: ["qty", "rv"] }] }) })]), dialect: "mssql" };
+    expect(playwrightTest(s)).toContain('updated: [{ where: { item: 3 }, set: { qty: 2, rv: expect.any(String) } }],');
+  });
+
+  it("takes times near the recording for now, as each database writes them", () => {
+    const times = ["2026-10-12 01:00:00.709223+00", "2026-10-12T10:00:00+09:00", "2026-10-12T01:00:00.1234567Z", "2026-10-12 01:00:00", "2026-10-12", 1791766800];
+    const rows = times.map((at, i) => ({ id: i, at, old: "2020-01-01 00:00:00+00" }));
+    const code = playwrightTest(sessionOf([step(1, 0, { label: "save", diff: diffOf({ table: { schema: "main", name: "log" }, key: [], inserted: rows }) })]));
+    expect(code.match(/at: expect\.any\((String|Number)\)/g)).toHaveLength(times.length);
+    expect(code).not.toContain('old: expect.any');
+  });
+
   it("is valid TypeScript", () => {
     const { diagnostics } = ts.transpileModule(generated, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.ESNext } });
     expect(diagnostics).toEqual([]);

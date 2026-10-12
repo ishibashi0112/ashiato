@@ -97,7 +97,7 @@ test("wrong expectation", async ({ page, expectDbChanges }) => {
   await page.goto("/");
   await expectDbChanges(() => page.getByRole("button", { name: "Save" }).click(), {
     orders: { inserted: [{ qty: 99 }] },
-  }, { timeout: 1000 });
+  }, { timeout: 3000 });
 });
 `,
     );
@@ -109,7 +109,8 @@ test("wrong expectation", async ({ page, expectDbChanges }) => {
     const failed = result("wrong expectation");
     expect(failed.status).toBe("failed");
     const message = failed.errors[0]?.message ?? "";
-    expect(message).toContain("Database changes don't match (waited 1s after the action)");
+    // waited for the whole timeout: the row that came is not the expected one
+    expect(message).toContain("Database changes don't match (waited 3s after the action)");
     expect(message).toContain("qty: expected 99, got 10");
     expect(message).toContain("stock changed (1 updated), but the expectation doesn't list it");
     // boxed step: the error points at the test's own expectDbChanges call

@@ -126,7 +126,7 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
     "// - put the database back in the state it was in when the recording started (restore a copy, or seed it again),",
     "// - set ASHIATO_DB_URL to that database (read-only access is enough),",
     "// - run tests that check the database one at a time: npx playwright test --workers=1",
-    "// Values the database makes up (keys of new rows and values referring to them, times near the recording)",
+    "// Values the database makes up (keys of new rows and values referring to them, times near the recording, row versions)",
     "// are matched with expect.any(): replace them with the exact value where it is always the same.",
     ...(interactions.length ? [] : ["// No screen replay was recorded (the Vite plugin records one): fill in the actions marked TODO."]),
     'import { test, expect } from "ashiato/playwright";',
@@ -221,7 +221,7 @@ const short = (s: string) => {
 
 /** `(POST /api/orders)`: what the step's action sent. */
 function requestsOf(step: Step): string {
-  if (!step.source || ["manual", "http", "ui", "sync"].includes(step.source) || step.label.includes(step.source)) return "";
+  if (!step.source || ["manual", "http", "ui", "sync", "mcp", "cli"].includes(step.source) || step.label.includes(step.source)) return "";
   return ` (${step.source})`;
 }
 
@@ -288,6 +288,8 @@ class Values {
     const any = typeof v === "number" ? "expect.any(Number)" : "expect.any(String)";
     // a random id the app made up for a new row
     if (inserted && typeof v === "string" && UUID.test(v)) return any;
+    // SQL Server rowversion: a new number, counted for the whole database, on every write
+    if (this.session.dialect === "mssql" && typeof v === "string" && ROWVERSION.test(v)) return any;
     if (this.isNow(v) || this.refersToNew(t, column, String(v))) return any;
     return typeof v === "string" ? q(v) : String(v);
   }
@@ -317,14 +319,17 @@ class Values {
       else if (v > 1e12 && v < 1e13) t = v;
     } else {
       const m = DATE.exec(v.trim());
-      if (m) t = Date.parse(m[2] ? `${m[1]}T${m[2]}${(m[3] ?? "").replace(/^([+-]\d{2})(\d{2})$/, "$1:$2")}` : `${m[1]}T12:00:00Z`);
+      // offsets as +09:00, +0900 or +09 (PostgreSQL)
+      const zone = (z = "") => z.replace(/^([+-]\d{2})(\d{2})$/, "$1:$2").replace(/^([+-]\d{2})$/, "$1:00");
+      if (m) t = Date.parse(m[2] ? `${m[1]}T${m[2]}${zone(m[3])}` : `${m[1]}T12:00:00Z`);
     }
     return t >= this.from && t <= this.to;
   }
 }
 
-const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
-const DATE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}:?\d{2})?)?$/;
+const ROWVERSION = /^0x[0-9a-f]{16}$/i;
+const UUID = /^(?:0x)?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+const DATE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}(?::?\d{2})?)?)?$/;
 /** customer_id, customerId, 受注ID */
 const ID_COLUMN = (c: string) => /(^|[_\-\s])id$/i.test(c) || /[a-z]Id$/.test(c) || /ID$/.test(c);
 
