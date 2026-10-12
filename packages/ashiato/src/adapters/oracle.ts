@@ -78,10 +78,11 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
         { owner: t.schema ?? owner, tbl: t.name },
       ).then((cols) => {
         const format = (type: string) => {
-          if (type === "DATE") return "YYYY-MM-DD HH24:MI:SS";
+          if (type === "DATE") return { text: "YYYY-MM-DD HH24:MI:SS" };
           const m = /^TIMESTAMP\((\d)\)( WITH (LOCAL )?TIME ZONE)?$/.exec(type);
           if (!m) return undefined;
-          return `YYYY-MM-DD HH24:MI:SS${m[1] === "0" ? "" : `.FF${m[1]}`}${m[2] && !m[3] ? " TZH:TZM" : ""}`;
+          // WITH LOCAL TIME ZONE comes in the session's zone, which the driver sets from this machine's: in UTC it reads the same on every machine
+          return { text: `YYYY-MM-DD HH24:MI:SS${m[1] === "0" ? "" : `.FF${m[1]}`}${m[2] ? " TZH:TZM" : ""}`, utc: Boolean(m[3]) };
         };
         if (!cols.some((c) => format(String(c.DATA_TYPE)))) return (alias: string) => `${alias}.*`;
         return (alias: string) =>
@@ -89,7 +90,7 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
             .map((c) => {
               const col = `${alias}.${q(String(c.COLUMN_NAME))}`;
               const f = format(String(c.DATA_TYPE));
-              return f ? `TO_CHAR(${col}, '${f}') AS ${q(String(c.COLUMN_NAME))}` : col;
+              return f ? `TO_CHAR(${f.utc ? `${col} AT TIME ZONE '+00:00'` : col}, '${f.text}') AS ${q(String(c.COLUMN_NAME))}` : col;
             })
             .join(", ");
       });

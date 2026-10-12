@@ -8,8 +8,8 @@ export const DIALOG_EVENT = "ashiato/dialog";
  */
 export const KEY_EVENT = "ashiato/key";
 /**
- * A `change` event a script dispatched on a <select> (`{ id }`): an option picked by a test tool or
- * a dropdown component, not set by the app. rrweb records such a change as not made by the user.
+ * A `change` event a script dispatched on a <select> or a date-like <input> (`{ id }`): a value picked
+ * by a test tool or a component, not set by the app. rrweb records such a change as not made by the user.
  */
 export const CHANGE_EVENT = "ashiato/change";
 /**

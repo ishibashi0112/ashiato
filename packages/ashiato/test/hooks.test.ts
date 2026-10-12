@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from "vitest";
-import { describe as describeEl, hookFetch, hookWebView, hookXhr, jsonRpc } from "../src/client/hooks.js";
+import { captioned, describe as describeEl, hookFetch, hookWebView, hookXhr, jsonRpc } from "../src/client/hooks.js";
 import { Tracker, type CheckpointPayload } from "../src/client/tracker.js";
 
 type Win = Window & typeof globalThis;
@@ -46,6 +46,18 @@ describe("describe()", () => {
     expect(describeEl(document.getElementById("x"))).toBe('button "Close"');
     document.body.innerHTML = `<input id="i" type="submit" name="ctl00$Main$btnSave" value="登録" />`;
     expect(describeEl(document.getElementById("i"))).toBe('input "登録"');
+  });
+
+  it("marks only buttons' captions and fields' labels as the app's own wording", () => {
+    document.body.innerHTML = `
+      <button id="b"><span id="s">保存</span></button>
+      <input id="i" type="submit" value="登録" /><input id="t" name="qty" /><select id="sel" name="kind"></select><textarea id="ta" name="memo"></textarea>
+      <a id="a" href="/c/1">Yamada Taro</a><table><tr role="button"><td id="td">Suzuki Hanako</td></tr></table>
+      <div role="button"><span id="r">Sato Ichiro</span></div><button role="tab" id="tab">Tanaka Trading</button>
+      <label><input id="c" type="checkbox" />Suzuki Trading</label><details><summary id="sum">Order 1234</summary></details>`;
+    const marked = (id: string) => captioned(document.getElementById(id));
+    for (const id of ["s", "i", "t", "sel", "ta"]) expect(marked(id), id).toBe(true);
+    for (const id of ["a", "td", "r", "tab", "c", "sum"]) expect(marked(id), id).toBe(false);
   });
 });
 

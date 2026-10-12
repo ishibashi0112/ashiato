@@ -102,6 +102,59 @@ describe("matchChanges", () => {
   it("names a column the rows don't have", () => {
     expect(problems(diff(orders), { orders: { inserted: [{ id: 1042, qty_typo: 1 }, { id: 1043 }] } })[0]).toContain("no column qty_typo (columns: id, customer_id, qty, note)");
   });
+
+  it("shows, for an update, the row its where picks as the closest one", () => {
+    const two: TableDiff = {
+      ...stock,
+      updated: [
+        { key: { item_id: 3 }, before: { item_id: 3, qty: 50, version: 1 }, after: { item_id: 3, qty: 40, version: 2 }, changed: ["qty", "version"] },
+        { key: { item_id: 4 }, before: { item_id: 4, qty: 20, version: 1 }, after: { item_id: 4, qty: 15, version: 2 }, changed: ["qty", "version"] },
+      ],
+    };
+    const [p] = problems(diff(two), { stock: { updated: [{ where: { item_id: 3 }, set: { qty: 40, version: 2 } }, { where: { item_id: 4 }, set: { qty: 15 } }] } });
+    expect(p).toContain("closest: ~ item_id=4  qty: 20 → 15, version: 1 → 2\n        version also changed: 1 → 2");
+    expect(p).not.toContain("not expected");
+  });
+
+  it("shows where two long texts differ", () => {
+    const long = "Deliver to the back door of the warehouse, between 9 and 12, and call 03-1234-5678 first";
+    const t: TableDiff = { ...orders, inserted: [{ id: 1, note: long }] };
+    const [p] = problems(diff(t), { orders: { inserted: [{ note: long.replace("5678", "5679") }] } });
+    expect(p).toContain('note: expected "…and call 03-1234-5679 first", got "…and call 03-1234-5678 first" (they differ from character 82)');
+  });
+
+  it("takes a function that throws on another row's value as not fitting it", () => {
+    const t: TableDiff = { ...orders, inserted: [{ id: 1, code: null }, { id: 2, code: "ORD-2" }] };
+    const startsWith = (v: unknown) => (v as string).startsWith("ORD-");
+    expect(problems(diff(t), { orders: { inserted: [{ code: startsWith }, { id: 1 }] } })).toEqual([]);
+    const none: TableDiff = { ...orders, inserted: [{ id: 1, code: null }, { id: 2, code: "X-2" }] };
+    const [p] = problems(diff(none), { orders: { inserted: [{ code: startsWith }, { id: 2 }] } });
+    expect(p).toMatch(/code: expected a value startsWith\(\) accepts, got null \(the function threw TypeError: Cannot read properties of null/);
+    // an arrow function written in the pattern is named after its column: not shown as qty()
+    expect(problems(diff(orders), { orders: { inserted: [{ qty: (v) => v === 3 }, { id: 1043 }] } })[0]).toContain("qty: expected a value the function accepts, got 10");
+  });
+
+  it("tells a table that can no longer be read apart from one that didn't change", () => {
+    const lost: WatchedTable[] = [{ table: orders.table }, { table: stock.table, skipped: "it could not be read: connection lost", lost: true }];
+    expect(problems(diff(orders), { orders: { inserted: 2 } }, lost)).toEqual(["dbo.stock can't be compared, so whether it changed is unknown: it could not be read: connection lost"]);
+    // one that could not be read before the action either is just not watched
+    expect(problems(diff(orders), { orders: { inserted: 2 } }, [{ table: orders.table }, { table: stock.table, skipped: "it has 200000 rows (more than maxRows)" }])).toEqual([]);
+  });
+
+  it("returns copies of the rows found", () => {
+    const r = matchChanges(diff(orders), { orders: { inserted: 2 } }, watched);
+    if (!r.ok) throw new Error(r.problems.join());
+    r.changes.orders!.inserted[0]!.note = "changed";
+    expect(orders.inserted[0]!.note).toBe(null);
+  });
+
+  it("names tables that differ only in case by the case written", () => {
+    const cased: WatchedTable[] = [{ table: { schema: "public", name: "User" } }, { table: { schema: "public", name: "user" } }];
+    const users = (name: string): TableDiff => ({ table: { schema: "public", name }, key: ["id"], inserted: [{ id: 1 }], updated: [], deleted: [] });
+    expect(problems(diff(users("User")), { "public.User": { inserted: 1 } }, cased)).toEqual([]);
+    expect(problems(diff(users("User")), { User: { inserted: 1 } }, cased)).toEqual([]);
+    expect(problems(diff(users("user")), { USER: { inserted: 1 } }, cased)).toEqual(['"USER" is ambiguous: public.User, public.user. Use schema.name', expect.stringContaining("public.user changed")]);
+  });
 });
 
 describe("valueMatches", () => {
@@ -148,5 +201,19 @@ describe("checkExpectation", () => {
     expect(() => checkExpectation({ orders: { updated: [{ id: 1 }] } } as never)).toThrow("orders.updated[0] must be { where:");
     expect(() => checkExpectation({ orders: { inserted: [{ meta: { a: 1 } }] } } as never)).toThrow("orders.inserted[0].meta must be a value");
     expect(() => checkExpectation({ orders: { inserted: [{ id: expect.any(Number), at: new Date(), n: /x/, f: () => true, u: undefined }] } })).not.toThrow();
+    expect(() => checkExpectation({ orders: { inserted: [{ at: new Date("x") }] } })).toThrow("orders.inserted[0].at is an invalid Date");
+    // a type is a slip for expect.any(type): as a function it would accept almost anything
+    expect(() => checkExpectation({ orders: { inserted: [{ name: String }] } })).toThrow("orders.inserted[0].name is the type String: for any String value, write expect.any(String)");
+    expect(() => checkExpectation({ orders: { updated: [{ where: { id: 1 }, set: { at: Date } }] } })).toThrow("orders.updated[0].set.at is the type Date");
   });
 });
+
+// rows of an interface type (no index signature) and lists made `as const` fit too (checked by tsc)
+interface NewOrder {
+  customer_id: number;
+  qty: number;
+}
+export function typedRowsFit(order: NewOrder): ExpectedChanges {
+  const rows = [{ qty: 1 }] as const;
+  return { orders: { inserted: [order], deleted: rows }, stock: { updated: [{ where: order, set: { qty: (v) => v !== null } }] } };
+}

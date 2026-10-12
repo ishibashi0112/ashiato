@@ -136,22 +136,103 @@ export function inFrame(n: DomNode): boolean {
   return false;
 }
 
+const SKIPPED = new Set(["script", "style", "noscript", "template"]);
+
 /**
- * The text of a node, whitespace collapsed (scripts and styles left out). With `alt`, images count
- * by their alt text, as in accessible names (Playwright's text and label matching leaves them out).
- * With `name`, hidden parts (an icon marked aria-hidden) are left out, as in accessible names.
+ * The text of a node as Playwright's getByText and getByLabel match it: its text nodes run together,
+ * whitespace collapsed, with the value of an <input type=submit|button> inside (images don't count).
  */
-export function textOf(n: DomNode, alt = true, name = false): string {
-  const parts: string[] = [];
-  const walk = (x: DomNode) => {
-    if (x.type === TEXT) parts.push(x.text);
-    if (x.type === ELEMENT && (x.tag === "script" || x.tag === "style" || x.tag === "noscript" || x.tag === "template")) return;
-    if (name && x !== n && x.type === ELEMENT && hiddenItself(x)) return;
-    if (alt && x.type === ELEMENT && x.tag === "img" && x.attrs.get("alt")) parts.push(` ${x.attrs.get("alt")} `);
-    for (const c of x.children) walk(c);
+export function textOf(n: DomNode): string {
+  const walk = (x: DomNode): string => {
+    if (x.type === TEXT) return x.text;
+    if (x.type === ELEMENT) {
+      if (SKIPPED.has(x.tag)) return "";
+      if (x.tag === "input" && /^(submit|button)$/i.test(x.attrs.get("type") ?? "")) return x.attrs.get("value") ?? "";
+    }
+    return x.children.map(walk).join("");
   };
-  walk(n);
-  return normalize(parts.join(""));
+  return normalize(walk(n));
+}
+
+/**
+ * The accessible name an element gets from its content, as Playwright computes it for getByRole: hidden
+ * parts left out (unless `includeHidden`, as getByRole then does), images by their alt text, and a
+ * space around each element that isn't shown inline. Whether it is depends on stylesheets, not known
+ * here: where an element begins or ends, the name is marked (see `nameText` and `namePattern`), unless
+ * its inline style says. `skip` is the element being named (inside its <label>).
+ */
+export function contentName(n: DomNode, includeHidden = false, skip?: DomNode): string {
+  const walk = (x: DomNode, top: boolean): string => {
+    if (x.type === TEXT) return x.text;
+    if (x.type !== ELEMENT) return "";
+    if (x === skip || SKIPPED.has(x.tag) || (!top && !includeHidden && hiddenItself(x))) return "";
+    const aria = normalize(x.attrs.get("aria-label") ?? "");
+    let token: string;
+    if (!top && aria) token = aria;
+    else if (x.tag === "img") token = normalize(x.attrs.get("alt") ?? "") || (x.attrs.get("title") ?? "");
+    else if (x.tag === "input" && /^(submit|button|reset)$/i.test(x.attrs.get("type") ?? "")) {
+      const type = x.attrs.get("type")!.toLowerCase();
+      token = normalize(x.attrs.get("value") ?? "") || (type === "submit" ? "Submit" : type === "reset" ? "Reset" : (x.attrs.get("title") ?? ""));
+    } else if (!top && (x.tag === "input" || x.tag === "textarea" || x.tag === "select")) token = x.attrs.get("value") ?? "";
+    else {
+      token = x.children.map((c) => walk(c, false)).join("");
+      if (!top && !nameText(token)) token = x.attrs.get("title") ?? "";
+    }
+    if (top) return token;
+    if (x.tag === "br") return ` ${token} `;
+    const display = displayOf(x);
+    if (display) return display === "inline" || display === "contents" ? token : ` ${token} `;
+    const mark = INLINE.has(x.tag) ? JOIN : GAP;
+    return `${mark}${token}${mark}`;
+  };
+  return walk(n, true);
+}
+
+/** Where an element of a name begins or ends, shown inline by default: no space, unless a stylesheet says otherwise. */
+const JOIN = "\u0001";
+/** Where an element of a name begins or ends, not shown inline by default (a <div>): a space, unless a stylesheet says otherwise. */
+const GAP = "\u0002";
+const MARKS = /[\u0001\u0002]/g;
+
+/** A name from `contentName` as the browser most likely has it. */
+export const nameText = (name: string) => normalize(name.replace(/\u0002/g, " ").replace(/\u0001/g, ""));
+
+/**
+ * A name from `contentName` as a regular expression (source), when a place between two of its
+ * characters may or may not hold a space depending on stylesheets: `受注 ?一覧`. Else undefined.
+ */
+export function namePattern(name: string): string | undefined {
+  const pieces = name.replace(/[\u200b\u00ad]/g, "").split(/([\s\u0001\u0002]+)/).filter((p) => p !== "");
+  const separator = (p: string) => /^[\s\u0001\u0002]+$/.test(p);
+  while (pieces.length && separator(pieces[0]!)) pieces.shift();
+  while (pieces.length && separator(pieces.at(-1)!)) pieces.pop();
+  let loose = false;
+  const source = pieces
+    .map((p) => {
+      if (!separator(p)) return p.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
+      if (/\s/.test(p.replace(MARKS, ""))) return " ";
+      loose = true;
+      return " ?";
+    })
+    .join("");
+  return loose ? `^${source}$` : undefined;
+}
+
+/** Elements the browser shows inline unless styled otherwise. */
+const INLINE = new Set(["a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "dfn", "em", "font", "i", "img", "kbd", "label", "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "tt", "u", "var", "wbr", "svg", "picture", "canvas", "video", "audio", "iframe", "object", "embed"]);
+
+/** The display an element's inline style gives it. */
+const displayOf = (n: DomNode) => /(?:^|;)\s*display\s*:\s*([a-z-]+)/i.exec(n.attrs.get("style") ?? "")?.[1]?.toLowerCase();
+
+/** The editable area (contenteditable) the node is in: Playwright fills it like a field. */
+export function editableOf(node: DomNode | undefined): DomNode | undefined {
+  let found: DomNode | undefined;
+  for (let p = node; p && isElement(p); p = p.parent) {
+    const v = p.attrs.get("contenteditable");
+    if (v === "false") break;
+    if (v !== undefined && ["", "true", "plaintext-only"].includes(v.toLowerCase())) found = p;
+  }
+  return found;
 }
 
 /** Hidden by an attribute or an inline style of its own (stylesheets aren't looked at). */

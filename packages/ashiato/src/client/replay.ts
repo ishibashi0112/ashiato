@@ -78,6 +78,8 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
 }
 
 const NOT_TEXT = new Set(["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "hidden"]);
+/** Inputs a test tool fills by setting the value from a script (Playwright's fill() on a date field), as a component may too. */
+const SET_BY_SCRIPT = new Set(["date", "time", "datetime-local", "month", "week", "color", "range"]);
 const META = 4;
 const CUSTOM = 5;
 
@@ -122,8 +124,9 @@ function recordForTests(win: Window, mask: boolean): void {
   win.document.addEventListener(
     "change",
     (e) => {
-      const target = e.target as Element | null;
-      if (!e.isTrusted && target?.tagName === "SELECT") add(CHANGE_EVENT, { id: record.mirror.getId(target) });
+      const target = e.target as HTMLInputElement | null;
+      if (e.isTrusted || !target) return;
+      if (target.tagName === "SELECT" || (target.tagName === "INPUT" && SET_BY_SCRIPT.has(target.type))) add(CHANGE_EVENT, { id: record.mirror.getId(target) });
     },
     true,
   );

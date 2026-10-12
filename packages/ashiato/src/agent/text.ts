@@ -1,7 +1,7 @@
 /**
  * Steps as text for AI agents (and `ashiato steps`). Without values, an agent learns which tables,
  * columns and how many rows changed, but none of the rows' values, nor anything else that may hold
- * them: URL queries, the text of what was clicked (a cell, a link) and the app's error messages.
+ * them: URL queries, the text of what was clicked (a cell, a link) and the app's and database's error messages.
  */
 import { countChanges, tableId } from "../core/diff.js";
 import type { ActionInfo, JsonValue, RequestInfo, Row, Step, TableDiff } from "../core/types.js";
@@ -18,19 +18,19 @@ const json = (v: JsonValue | Row | undefined) => JSON.stringify(v ?? null);
 const withoutQuery = (url: string) => url.replace(/[?#].*$/s, (q) => (q.length > 1 ? "?…" : ""));
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/** Elements whose text is the app's own wording (a button's caption, a field's label), not data. */
-const CAPTIONED = new Set(["button", "input", "select", "textarea", "summary", "menuitem", "tab"]);
-/** `button "Save"` stays; a link, a cell, an option or a form can show data, so only its kind is kept. */
-const targetShape = (target: string) => {
-  const kind = /^([^\s"]+) "/.exec(target)?.[1];
-  return kind && !CAPTIONED.has(kind) ? kind : target;
-};
+/**
+ * `button "Save"` stays when the browser marked its text as the app's own wording (a button's caption,
+ * a field's label); a link, a cell, an option, a row made clickable can show data, so only its kind is kept.
+ */
+const targetShape = (target: string, caption: boolean | undefined) => (caption ? target : target.split('"')[0]!.trim() || undefined);
 
 /** The action without what may hold values: the page's query, the clicked text, error messages. */
 function actionShape(a: ActionInfo): ActionInfo {
+  const { target, ...rest } = a;
+  const shown = target && targetShape(target, a.caption);
   return {
-    ...a,
-    ...(a.target ? { target: targetShape(a.target) } : {}),
+    ...rest,
+    ...(shown ? { target: shown } : {}),
     ...(a.page ? { page: withoutQuery(a.page) } : {}),
     requests: a.requests.map(requestShape),
   };
@@ -44,8 +44,12 @@ function labelShape(step: Step): string {
   if (!a) return step.label;
   // a request on its own is labelled with its URL (or WebView2 method)
   if (a.type === "request") return withoutQuery(step.label);
-  return a.target ? `${a.type} ${targetShape(a.target)}` : a.type;
+  const target = a.target && targetShape(a.target, a.caption);
+  return target ? `${a.type} ${target}` : a.type;
 }
+
+/** A database's error message can quote a row's value ("Conversion failed when converting the varchar value 'A12'"). */
+const reasonShape = (reason: string) => (reason.startsWith("could not be read") ? "could not be read (the database's message is not shown)" : reason);
 
 /** One line: `#3 click button "Save" (POST /api/orders): orders +1 ~1, stock ~1`. */
 export function stepLine(step: Step, options: Pick<TextOptions, "values"> = { values: true }): string {
@@ -80,7 +84,7 @@ export function stepText(step: Step, options: TextOptions = {}): string {
   }
   for (const t of step.addedTables ?? []) lines.push(`new table: ${tableId(t)} (its rows show as inserted)`);
   for (const t of step.removedTables ?? []) lines.push(`table gone: ${tableId(t)} (dropped, renamed or no longer readable)`);
-  for (const s of step.skipped ?? []) lines.push(`not compared: ${tableId(s.table)} (${s.reason})`);
+  for (const s of step.skipped ?? []) lines.push(`not compared: ${tableId(s.table)} (${options.values ? s.reason : reasonShape(s.reason)})`);
   if (step.diff.tables.length === 0) lines.push("changes: none");
   else lines.push("changes:", ...step.diff.tables.flatMap((t) => tableLines(t, options.values ?? false, max)));
   return lines.join("\n");
@@ -124,6 +128,6 @@ export function stepShape(step: Step) {
     })),
     ...(step.addedTables ? { addedTables: step.addedTables.map(tableId) } : {}),
     ...(step.removedTables ? { removedTables: step.removedTables.map(tableId) } : {}),
-    ...(step.skipped ? { skipped: step.skipped.map((s) => ({ table: tableId(s.table), reason: s.reason })) } : {}),
+    ...(step.skipped ? { skipped: step.skipped.map((s) => ({ table: tableId(s.table), reason: reasonShape(s.reason) })) } : {}),
   };
 }

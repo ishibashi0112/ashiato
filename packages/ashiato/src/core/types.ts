@@ -83,6 +83,8 @@ export interface ActionInfo {
   type: string;
   /** Human-readable target, e.g. `button "Save"`. */
   target?: string;
+  /** The target's text is the app's own wording (a button's caption, a text field's label), not data: an AI told no values sees it. */
+  caption?: boolean;
   /** Page path when the action happened. */
   page?: string;
   /** Browser tab the action happened in; matches the tab of its screen replay events. */

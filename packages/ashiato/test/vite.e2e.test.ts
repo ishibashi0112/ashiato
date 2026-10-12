@@ -219,6 +219,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
   };
 
   it("records what was typed, picked and answered, for a test made from the recording", async () => {
+    // Playwright sets a date with untrusted events, like a calendar would
+    await page.getByLabel("納期").fill("2026-10-20");
     await page.getByPlaceholder("数量").fill("2");
     // Playwright picks options with untrusted events, like a script would
     await page.getByLabel("品目").selectOption("4");
@@ -238,7 +240,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     await page.evaluate(() => new Promise((r) => setTimeout(r, 1500)));
     const code = await generateTest(recorder.session, { media: serverOptions.media });
     const qty = (step: Step) => table(step, "stock")!.updated[0]!.after.qty;
-    expect(code).toContain(`  await page.getByPlaceholder("数量", { exact: true }).fill("2");
+    expect(code).toContain(`  await page.getByLabel("納期", { exact: true }).fill("2026-10-20");
+  await page.getByPlaceholder("数量", { exact: true }).fill("2");
   await page.getByLabel("品目", { exact: true }).selectOption("4");
 
   // #${clicked.id} click button "注文" (POST /api/stock)

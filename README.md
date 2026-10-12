@@ -130,12 +130,12 @@ test("placing an order", async ({ page, expectDbChanges }) => {
 ```
 
 - It reads the watched tables before the action, runs it, then waits until the changes stop for `settleMs` (300 ms) and match, for up to `timeout` (5 s).
-- Every table listed must change exactly as described, and **no other watched table may change**. `{}` checks that nothing changed; `orders: {}` that `orders` didn't.
+- Every table listed must change exactly as described, and **no other watched table may change**. `{}` checks that nothing changed; `orders: {}` that `orders` didn't. A watched table that could be read before the action but not after it fails the check too, since it may have changed.
 - `inserted` / `deleted` are rows or a count (`inserted: 300`). `updated` rows are `{ where, set }`: `where` picks the row, and `set` lists every column the update changed (leave columns like `updated_at`, and SQL Server `rowversion` columns, to `ignoreColumns`). Only the columns you give are compared, names in any case, and Playwright's `expect.any()`, `expect.stringContaining()` and the like work in them. A `Date` matches the same moment; times the database gives without a time zone are read as UTC, so a test passes the same on every machine.
 - When it fails, the error says which rows and columns differ, lists changes the expectation doesn't mention, and shows everything that changed. It points at your test's line, as a step named `expect database changes: orders +1, stock ~1`.
 - Run tests that check the same database one at a time (`--workers=1`): parallel tests would see each other's writes.
 - Options (`test.use({ ashiato })`): `db`, `tables`, `ignoreColumns`, `maxRows`, `timeout`, `settleMs`. Per call, as the third argument: `timeout`, `settleMs`.
-- Without Playwright: `import { watchDb } from "ashiato"`, then `await watchDb(url).expectChanges(action, expected)`.
+- Without Playwright: `import { watchDb } from "ashiato"`, then `const db = watchDb(url)`, `await db.expectChanges(action, expected)`, and `await db.close()` at the end (an open connection keeps Node running).
 
 ## Tests from a recording
 
@@ -188,7 +188,7 @@ Sessions are saved in `--out` (default `.ashiato/sessions`), and relative paths 
 | `generate_test` | Writes a Playwright test from the recording (see above) |
 | `export_evidence` | Writes Excel / PDF / HTML evidence |
 
-**Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values, no URL queries, no text of what was clicked other than buttons and fields, and no error messages of the app. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
+**Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values, no URL queries, no text of what was clicked other than buttons' captions and text fields' labels (a link, a cell, a checkbox's label or a row made clickable can show data), and no error messages of the app or the database. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
 
 **CLI.** For scripts, and agents that run commands:
 
@@ -407,12 +407,12 @@ test("注文する", async ({ page, expectDbChanges }) => {
 ```
 
 - 操作の前に対象テーブルを読み、操作を実行してから、変更が `settleMs`(300ミリ秒)止まって期待と合うまで、最大 `timeout`(5秒)待ちます
-- 書いたテーブルはすべて書いたとおりに変わる必要があり、**書いていない対象テーブルが変わると失敗**します。`{}` は「何も変わらない」、`orders: {}` は「orders は変わらない」を確かめます
+- 書いたテーブルはすべて書いたとおりに変わる必要があり、**書いていない対象テーブルが変わると失敗**します。`{}` は「何も変わらない」、`orders: {}` は「orders は変わらない」を確かめます。操作の前には読めたのに後で読めなくなった対象テーブルも、変わったかもしれないので失敗にします
 - `inserted` / `deleted` は行のリストか件数(`inserted: 300`)、`updated` は `{ where, set }` のリストです。`where` で行を選び、`set` にはその更新で変わった列をすべて書きます(`updated_at` のような列や SQL Server の `rowversion` 列は `ignoreColumns` に)。書いた列だけを比べ(列名の大文字・小文字は問いません)、Playwright の `expect.any()` や `expect.stringContaining()` なども使えます。`Date` は同じ時刻かを比べます。DB がタイムゾーンなしで返す時刻は UTC として読むので、どのマシンでも同じ結果になります
 - 失敗すると、どの行のどの列が違うか、期待にない変更、実際に変わったものすべてをエラーに出します。エラーはテスト自身の行を指し、レポートには `expect database changes: orders +1, stock ~1` というステップで表示されます
 - 同じDBを確かめるテストは1つずつ実行してください(`--workers=1`)。並列だとお互いの書き込みが見えてしまいます
 - オプション(`test.use({ ashiato })`):`db`・`tables`・`ignoreColumns`・`maxRows`・`timeout`・`settleMs`。呼び出しごと(第3引数)には `timeout`・`settleMs`
-- Playwright なしでも使えます:`import { watchDb } from "ashiato"` して `await watchDb(url).expectChanges(操作, 期待)`
+- Playwright なしでも使えます:`import { watchDb } from "ashiato"` して `const db = watchDb(url)`、`await db.expectChanges(操作, 期待)`、最後に `await db.close()`(接続が開いたままだと Node が終わりません)
 
 ### 記録からテストを作る
 
@@ -451,7 +451,7 @@ npx ashiato mcp --recorder http://127.0.0.1:4100   # 起動中の ashiato record
 | `generate_test` | 記録から Playwright のテストを書き出します(上記) |
 | `export_evidence` | Excel / PDF / HTML の証跡を書き出します |
 
-**行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値・URLのクエリ・クリックした要素の文字(ボタンと入力欄以外)・アプリのエラーメッセージは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
+**行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値・URLのクエリ・クリックした要素の文字(ボタンの表記と入力欄のラベル以外。リンク・セル・チェックボックスのラベル・クリックできる行はデータを表示していることがあるため)・アプリやDBのエラーメッセージは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
 
 **CLI**:スクリプトや、コマンドを実行するエージェント向けです。
 

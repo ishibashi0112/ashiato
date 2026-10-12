@@ -447,6 +447,33 @@ for (const [dialect, d] of Object.entries(dialects)) {
       }
     }, 60_000);
 
+    it.runIf(dialect === "oracle")("reads TIMESTAMP WITH LOCAL TIME ZONE the same whatever this machine's time zone", async () => {
+      const w = await d.writer(url!);
+      await w.run("DROP TABLE ashiato_local").catch(() => undefined);
+      await w.run("CREATE TABLE ashiato_local (id INT PRIMARY KEY, at TIMESTAMP(6) WITH LOCAL TIME ZONE, at0 TIMESTAMP(0) WITH LOCAL TIME ZONE)");
+      await w.run("INSERT INTO ashiato_local VALUES (1, TIMESTAMP '2026-10-11 00:00:00.000100 +00:00', TIMESTAMP '2026-10-11 09:00:00 +09:00')");
+      const readOnly = await w.readOnlyUrl(["ashiato_local"]);
+      const saved = process.env.ORA_SDTZ;
+      try {
+        // the driver sets the session's time zone from this machine's, or from ORA_SDTZ
+        for (const zone of ["+09:00", "-05:00"]) {
+          process.env.ORA_SDTZ = zone;
+          const db = await connect(readOnly);
+          try {
+            const [t] = (await db.listTables()).filter((x) => /ashiato_local/i.test(x.name));
+            expect(lower((await db.readRows(t!))[0])).toEqual({ id: 1, at: "2026-10-11 00:00:00.000100 +00:00", at0: "2026-10-11 00:00:00 +00:00" });
+          } finally {
+            await db.close();
+          }
+        }
+      } finally {
+        if (saved === undefined) delete process.env.ORA_SDTZ;
+        else process.env.ORA_SDTZ = saved;
+        await w.run("DROP TABLE ashiato_local").catch(() => undefined);
+        await w.close();
+      }
+    });
+
     it.runIf(dialect === "postgres")("reads a partitioned table once, and dates as written", async () => {
       const w = await d.writer(url!);
       await w.run("DROP TABLE IF EXISTS ashiato_parted");

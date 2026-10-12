@@ -67,7 +67,7 @@ export { DbChangesError, DbWatcher, watchDb, type ExpectOptions, type WatchOptio
 function summarize(expected: ExpectedChanges): string {
   // a wrong expectation gets its own message from expectChanges
   if (typeof expected !== "object" || expected === null) return String(expected);
-  const count = (v: number | unknown[] | undefined) => (typeof v === "number" ? v : (v?.length ?? 0));
+  const count = (v: number | readonly unknown[] | undefined) => (typeof v === "number" ? v : (v?.length ?? 0));
   const kinds = [["+", "inserted"], ["~", "updated"], ["-", "deleted"]] as const;
   const parts = Object.entries(expected).map(([name, c]) => {
     const n = kinds.filter(([, k]) => count(c?.[k]) > 0).map(([sign, k]) => `${sign}${count(c?.[k])}`);

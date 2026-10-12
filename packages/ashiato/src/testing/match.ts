@@ -20,8 +20,13 @@ interface Asymmetric {
   asymmetricMatch(actual: unknown): boolean;
 }
 
-/** Some of a row's columns and what their values must be. Other columns (and `undefined` ones) can hold anything. */
-export type RowPattern = Record<string, ValueMatcher | undefined>;
+/**
+ * Some of a row's columns and what their values must be. Other columns (and `undefined` ones) can hold
+ * anything. (`object` lets in values of an interface type, which have no index signature.)
+ */
+export type RowPattern = Columns | object;
+
+type Columns = { readonly [column: string]: ValueMatcher | undefined };
 
 /** An updated row: `where` picks it out by its values before the update, `set` lists every column the update changed. */
 export interface UpdatePattern {
@@ -34,9 +39,9 @@ export interface UpdatePattern {
  * how many rows changed that way. A kind left out means no row changed that way.
  */
 export interface TableChanges {
-  inserted?: number | RowPattern[];
-  updated?: number | UpdatePattern[];
-  deleted?: number | RowPattern[];
+  inserted?: number | readonly RowPattern[];
+  updated?: number | readonly UpdatePattern[];
+  deleted?: number | readonly RowPattern[];
 }
 
 /** Expected changes by table (`name` or `schema.name`, case-insensitive). Tables left out must not change. */
@@ -60,6 +65,8 @@ export interface WatchedTable {
   table: TableRef;
   /** Why it can't be compared (too large, unreadable). */
   skipped?: string;
+  /** It could be read before the action but not now: what it changed is unknown, listed or not. */
+  lost?: boolean;
 }
 
 const KINDS = ["inserted", "updated", "deleted"] as const;
@@ -96,8 +103,15 @@ export function checkExpectation(expected: ExpectedChanges): void {
   }
 }
 
+/** Built-in types: `{ name: String }` is a slip for `expect.any(String)`, not a function that accepts values. */
+const TYPES = new Set<unknown>([String, Number, Boolean, BigInt, Date, Object, Array, RegExp, Symbol, Buffer]);
+
 function checkValues(pattern: Record<string, unknown>, where: string): void {
   for (const [col, v] of Object.entries(pattern)) {
+    if (typeof v === "function" && (TYPES.has(v) || /^class\b/.test(Function.prototype.toString.call(v)))) {
+      throw new TypeError(`${where}.${col} is the type ${v.name}: for any ${v.name} value, write expect.any(${v.name})`);
+    }
+    if (v instanceof Date && Number.isNaN(v.getTime())) throw new TypeError(`${where}.${col} is an invalid Date`);
     const ok =
       v === null ||
       v === undefined ||
@@ -140,7 +154,8 @@ export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: Wat
     for (const kind of KINDS) {
       const r = matchKind(t, kind, exp[kind] ?? 0);
       if (r.problems.length) problems.push(...r.problems.map((p) => `${id}: ${p}`));
-      else (set[kind] as unknown[]) = r.rows;
+      // copies: the rows found are the ones the next call compares from, changing them must not change that
+      else (set[kind] as unknown[]) = structuredClone(r.rows);
     }
     changes[name] = set;
   }
@@ -150,6 +165,11 @@ export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: Wat
     if (claimed.has(id)) continue;
     const parts = KINDS.filter((k) => t[k].length).map((k) => `${t[k].length} ${k}`);
     problems.push(`${id} changed (${parts.join(", ")}), but the expectation doesn't list it:\n${indent(describeTable(t, 5), 4)}`);
+  }
+  // a table not listed must not change: one that can no longer be read may have
+  for (const w of watched) {
+    const id = tableId(w.table);
+    if (w.lost && !claimed.has(id)) problems.push(`${id} can't be compared, so whether it changed is unknown: ${w.skipped}`);
   }
 
   return problems.length ? { ok: false, problems } : { ok: true, changes };
@@ -178,9 +198,16 @@ export function tableProblems(expected: ExpectedChanges, watched: WatchedTable[]
 }
 
 function resolveTable(name: string, watched: WatchedTable[]): WatchedTable | string {
-  const n = name.trim().toLowerCase();
-  const exact = watched.filter((w) => tableId(w.table).toLowerCase() === n);
-  const found = exact.length ? exact : watched.filter((w) => w.table.name.toLowerCase() === n);
+  const n = name.trim();
+  // schema.name before name, and the case as written before any case (two tables can differ only in case)
+  const tries = [
+    (w: WatchedTable) => tableId(w.table) === n,
+    (w: WatchedTable) => tableId(w.table).toLowerCase() === n.toLowerCase(),
+    (w: WatchedTable) => w.table.name === n,
+    (w: WatchedTable) => w.table.name.toLowerCase() === n.toLowerCase(),
+  ];
+  let found: WatchedTable[] = [];
+  for (const fits of tries) if (!found.length) found = watched.filter(fits);
   if (found.length === 1) return found[0]!;
   if (found.length > 1) return `"${name}" is ambiguous: ${found.map((w) => tableId(w.table)).join(", ")}. Use schema.name`;
   const names = watched.map((w) => tableId(w.table));
@@ -190,7 +217,7 @@ function resolveTable(name: string, watched: WatchedTable[]): WatchedTable | str
 
 type KindResult = { rows: unknown[]; problems: string[] };
 
-function matchKind(t: TableDiff, kind: Kind, expected: number | RowPattern[] | UpdatePattern[]): KindResult {
+function matchKind(t: TableDiff, kind: Kind, expected: number | readonly RowPattern[] | readonly UpdatePattern[]): KindResult {
   const actual: (Row | UpdatedRow)[] = t[kind];
   const rowsOf = (n: number) => `${n} ${kind} row${n === 1 ? "" : "s"}`;
   const show = (list: (Row | UpdatedRow)[]) => {
@@ -221,11 +248,14 @@ function matchKind(t: TableDiff, kind: Kind, expected: number | RowPattern[] | U
       return;
     }
     lines.push(`expected ${text}: ${actual.length ? "no row matches" : "not found"}`);
-    // the row it is closest to, to show what differs
-    let best: { row: Row | UpdatedRow; why: string[] } | undefined;
+    // the row it is closest to, to show what differs: for an update, first a row its `where` picks
+    const rank = (row: Row | UpdatedRow, why: string[]) =>
+      (kind === "updated" && rowMismatch((p as UpdatePattern).where, (row as UpdatedRow).before).length ? 1e6 : 0) + why.length;
+    let best: { row: Row | UpdatedRow; why: string[]; rank: number } | undefined;
     for (const row of unmatchedRows.length ? unmatchedRows : actual) {
       const why = mismatch(row);
-      if (!best || why.length < best.why.length) best = { row, why };
+      const r = rank(row, why);
+      if (!best || r < best.rank) best = { row, why, rank: r };
     }
     if (best) {
       shown.add(best.row);
@@ -274,14 +304,24 @@ function columnOf(row: Row, name: string): string | undefined {
 /** Why the row doesn't fit the pattern: one entry per column that differs (empty when it fits). */
 function rowMismatch(pattern: RowPattern, row: Row, what = ""): string[] {
   const why: string[] = [];
-  for (const [name, m] of Object.entries(pattern)) {
+  for (const [name, m] of Object.entries(pattern as Columns)) {
     if (m === undefined) continue;
     const col = columnOf(row, name);
     if (col === undefined) {
       why.push(`no column ${what}${name} (columns: ${Object.keys(row).join(", ")})`);
       continue;
     }
-    if (!valueMatches(m, row[col]!)) why.push(`${what}${col}: expected ${describeMatcher(m)}, got ${describeValue(row[col]!)}`);
+    const actual = row[col]!;
+    let ok: boolean;
+    let threw = "";
+    try {
+      ok = valueMatches(m, actual);
+    } catch (e) {
+      // a function written for the expected row can fail on another row's values (a null): that row doesn't fit
+      ok = false;
+      threw = ` (the function threw ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)})`;
+    }
+    if (!ok) why.push(`${what}${col}: ${describeMismatch(m, actual, name)}${threw}`);
   }
   return why;
 }
@@ -290,7 +330,7 @@ function updateMismatch(p: UpdatePattern, u: UpdatedRow): string[] {
   const why = rowMismatch(p.where, u.before, "where ");
   // once the row is the right one, say how the update differs
   if (why.length) return why;
-  const set = Object.keys(p.set).filter((k) => p.set[k] !== undefined);
+  const set = Object.keys(p.set).filter((k) => (p.set as Columns)[k] !== undefined);
   for (const c of u.changed) {
     if (!set.some((s) => columnOf(u.after, s) === c)) why.push(`${c} also changed: ${describeValue(u.before[c] ?? null)} → ${describeValue(u.after[c] ?? null)}`);
   }
@@ -356,27 +396,43 @@ export function describeValue(v: JsonValue): string {
   return s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT - 2)}…"` : s;
 }
 
-function describeMatcher(m: ValueMatcher): string {
+/** `expected "x", got "y"`: two long texts are shown from a little before where they differ, so the difference is seen. */
+function describeMismatch(m: ValueMatcher, actual: JsonValue, column: string): string {
+  if (typeof m === "string" && typeof actual === "string" && Math.max(m.length, actual.length) > MAX_TEXT - 10) {
+    let i = 0;
+    while (i < m.length && m[i] === actual[i]) i++;
+    const from = Math.max(0, i - 20);
+    const part = (s: string) => {
+      const shown = JSON.stringify(s.slice(from, from + MAX_TEXT - 20)).slice(1, -1);
+      return `"${from > 0 ? "…" : ""}${shown}${from + MAX_TEXT - 20 < s.length ? "…" : ""}"`;
+    };
+    return `expected ${part(m)}, got ${part(actual)} (they differ from character ${i + 1})`;
+  }
+  return `expected ${describeMatcher(m, column)}, got ${describeValue(actual)}`;
+}
+
+function describeMatcher(m: ValueMatcher, column?: string): string {
   if (isAsymmetric(m)) {
     const a = m as { toAsymmetricMatcher?: () => string; toString(): string };
     return typeof a.toAsymmetricMatcher === "function" ? a.toAsymmetricMatcher() : String(a);
   }
   if (m instanceof RegExp) return String(m);
-  if (typeof m === "function") return `a value ${m.name ? `${m.name}() accepts` : "the function accepts"}`;
+  // an arrow function written in the pattern is named after its column: that name says nothing
+  if (typeof m === "function") return `a value ${m.name && m.name !== column ? `${m.name}() accepts` : "the function accepts"}`;
   if (m instanceof Date) return m.toISOString();
   if (typeof m === "bigint") return `${m}n`;
   return describeValue(m as JsonValue);
 }
 
-const describeColumns = (row: Record<string, unknown>, value: (v: never) => string) =>
+const describeColumns = (row: Record<string, unknown>, value: (v: never, column: string) => string) =>
   `{ ${Object.entries(row)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${k}: ${value(v as never)}`)
+    .map(([k, v]) => `${k}: ${value(v as never, k)}`)
     .join(", ")} }`;
 
-const describePattern = (p: RowPattern) => describeColumns(p, describeMatcher);
+const describePattern = (p: RowPattern) => describeColumns(p as Columns, describeMatcher);
 const describeUpdatePattern = (p: UpdatePattern) => `{ where: ${describePattern(p.where)}, set: ${describePattern(p.set)} }`;
-export const describeRow = (r: Row) => describeColumns(r, describeValue);
+export const describeRow = (r: Row) => describeColumns(r, (v: JsonValue) => describeValue(v));
 
 function keyText(t: { key: string[] }, row: Row): string {
   if (t.key.length === 0) return describeRow(row);

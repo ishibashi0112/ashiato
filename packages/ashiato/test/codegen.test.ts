@@ -107,6 +107,48 @@ describe("locators", () => {
     expect((locate("div.row") as { label: string }).label).toBe('div "山田商事"');
   });
 
+  it("gives inputs the roles and names Playwright gives them", () => {
+    const { locate } = domOf(`
+      <input type="date" class="d"> <input type="search" class="s"> <input type="file" class="f">
+      <input type="image" alt="検索" class="i"> <input type="reset" class="r">
+      <div role="foo button" tabindex="0" class="tokens">押す</div>
+      <div role="presentation" class="backdrop"><div role="dialog" aria-label="確認">削除しますか？</div></div>`);
+    expect(code(locate(".d"))).toBe('getByRole("textbox")');
+    expect(code(locate(".s"))).toBe('getByRole("searchbox")');
+    expect(code(locate(".f"))).toBe('getByRole("button", { name: "Choose File", exact: true })');
+    expect(code(locate(".i"))).toBe('getByRole("button", { name: "検索", exact: true })');
+    expect(code(locate(".r"))).toBe('getByRole("button", { name: "Reset", exact: true })');
+    // the first role Playwright knows
+    expect(code(locate(".tokens"))).toBe('getByRole("button", { name: "押す", exact: true })');
+    // no role, and not focusable: no implicit role either
+    expect(code(locate(".backdrop"))).toBe('locator("div").nth(1)');
+  });
+
+  it("allows a space where stylesheets decide whether there is one", () => {
+    const { locate } = domOf(`
+      <a class="spans"><span>受注</span><span>一覧</span></a>
+      <button class="spaced"><span>保存</span> <span>する</span></button>
+      <button class="br">保存<br>して閉じる</button>`);
+    // not a link without a href: by its text, which has no spaces
+    expect(code(locate(".spans"))).toBe('getByText("受注一覧", { exact: true })');
+    for (const html of [`<a href="/o"><span>受注</span><span>一覧</span></a>`, `<a href="/o"><div>受注</div><div>一覧</div></a>`]) {
+      expect(code(domOf(html).locate("a"))).toBe('getByRole("link", { name: /^受注 ?一覧$/ })');
+    }
+    expect(code(domOf(`<a href="/i"><div>品目</div><div>(税込)</div></a>`).locate("a"))).toBe(String.raw`getByRole("link", { name: /^品目 ?\(税込\)$/ })`);
+    // known from the element's own style, or the text
+    expect(code(domOf(`<a href="/s"><span style="display: block">在庫</span><span>一覧</span></a>`).locate("a"))).toBe('getByRole("link", { name: "在庫 一覧", exact: true })');
+    expect(code(locate(".spaced"))).toBe('getByRole("button", { name: "保存 する", exact: true })');
+    expect(code(locate(".br"))).toBe('getByRole("button", { name: "保存 して閉じる", exact: true })');
+    expect((domOf(`<a href="/o"><span>受注</span><span>一覧</span></a>`).locate("a") as { label: string }).label).toBe('link "受注一覧"');
+  });
+
+  it("counts hidden text in names when counting hidden elements, as Playwright does", () => {
+    const { locate } = domOf(`<button><span aria-hidden="true">edit</span>編集</button><button class="b"><span aria-hidden="true">edit</span>編集</button>`);
+    expect(code(locate(".b"))).toBe('getByRole("button", { name: /^edit ?編集$/, includeHidden: true }).nth(1)');
+    const plain = domOf(`<button>保存<span style="display:none">中</span></button><button class="b">保存<span style="display:none">中</span></button>`);
+    expect(code(plain.locate(".b"))).toBe('getByRole("button", { name: "保存 中", exact: true, includeHidden: true }).nth(1)');
+  });
+
   it("can't find elements in frames", () => {
     const page = snapshot(`<iframe></iframe>`);
     const dom = new Dom();
@@ -286,6 +328,62 @@ describe("what the user did", () => {
       ["click", 'getByRole("button", { name: "保存", exact: true })'],
       ["goto", "http://127.0.0.1:5173/done", "followed"],
       ["goto", "http://127.0.0.1:5173/orders"],
+    ]);
+  });
+
+  it("clicks the label the user clicked to check a box, as the box itself may be hidden behind a styled one", () => {
+    const r = recording(`<label class="agree"><input type="checkbox" id="c" style="opacity: 0">同意する</label><input type="checkbox" id="d"><label for="d">VIP</label>`);
+    r.click(100, ".agree").input(100, "#c", "on", { isChecked: true });
+    r.click(500, "label[for=d]").input(501, "#d", "on", { isChecked: true });
+    // unchecked by a script later: not the user
+    r.input(5000, "#d", "off", { isChecked: false });
+    expect(brief(r.interactions()).slice(1)).toEqual([
+      ["click", 'getByText("同意する", { exact: true })'],
+      ["click", 'getByText("VIP", { exact: true })'],
+      ["uncheck", 'getByRole("checkbox", { name: "VIP", exact: true })'],
+    ]);
+  });
+
+  it("keeps a click into a field nothing is typed in: it may open a calendar or a list", () => {
+    const r = recording(`<input id="day" readonly placeholder="納期"><input id="qty" placeholder="数量">`).click(100, "#day").click(500, "#qty").input(600, "#qty", "3");
+    expect(brief(r.interactions()).slice(1)).toEqual([
+      ["click", 'getByPlaceholder("納期", { exact: true })'],
+      ["fill", 'getByPlaceholder("数量", { exact: true })', "3"],
+    ]);
+  });
+
+  it("fills an editable area with what was typed in it", () => {
+    const r = recording(`<div contenteditable="true" aria-label="本文" id="body"><p id="p">こん</p></div><button id="save">保存</button>`);
+    r.click(100, "#p");
+    const typed = (ms: number, text: string) => r.events.push({ type: 3, timestamp: T0 + ms, data: { source: 0, texts: [{ id: r.id("#p") + 1, value: text }] } });
+    typed(200, "こんにち");
+    typed(300, "こんにちは");
+    r.click(1000, "#save");
+    expect(brief(r.interactions()).slice(1)).toEqual([
+      ["fill", 'getByLabel("本文", { exact: true })', "こんにちは"],
+      ["click", 'getByRole("button", { name: "保存", exact: true })'],
+    ]);
+    expect(r.interactions()[1]!.t).toBe(T0 + 300);
+    // found by what it is, not by the text the test changes
+    const plain = recording(`<div contenteditable id="memo"><p id="p">こん</p></div><div contenteditable="true">メモ</div>`);
+    plain.click(100, "#p");
+    plain.events.push({ type: 3, timestamp: T0 + 200, data: { source: 0, texts: [{ id: plain.id("#p") + 1, value: "こんにちは" }] } });
+    plain.click(300, "#p");
+    expect(brief(plain.interactions()).slice(1)).toEqual([
+      ["fill", 'locator("#memo")', "こんにちは"],
+      ["click", 'locator("#memo")'],
+    ]);
+  });
+
+  it("leaves out a value set by a component the user picked it in: the clicks pick it again", () => {
+    // a dropdown that sets the field after a click on its option, then sends change
+    const r = recording(`<input id="city" placeholder="都市"><ul role="listbox"><li role="option" id="osaka">大阪</li></ul><select id="real" style="display: none"><option>1</option></select>`);
+    r.click(100, "#city").click(400, "#osaka").input(410, "#city", "大阪", { userTriggered: false }).custom(411, CHANGE_EVENT, { id: r.id("#city") });
+    // a hidden select a styled dropdown keeps in step
+    r.input(420, "#real", "1", { userTriggered: false }).custom(421, CHANGE_EVENT, { id: r.id("#real") });
+    expect(brief(r.interactions()).slice(1)).toEqual([
+      ["click", 'getByPlaceholder("都市", { exact: true })'],
+      ["click", 'getByRole("option", { name: "大阪", exact: true })'],
     ]);
   });
 
@@ -475,6 +573,40 @@ describe("generated Playwright tests", () => {
   await expectDbChanges(() => page.getByRole("button", { name: "保存", exact: true }).click(), {`);
     expect(code).toContain('await page.getByPlaceholder("パス", { exact: true }).fill(""); // TODO: the value typed here was masked when recorded');
     expect(code).toContain('// #3 ran the batch\n');
+    expect(valid(code)).toEqual([]);
+  });
+
+  it("takes for a field's change only what was typed in it before, not typing in the next field", () => {
+    const page = recording(`<input id="qty" placeholder="数量"><input id="note" placeholder="備考">`);
+    page.input(3000, "#qty", "5").input(4510, "#note", "至急");
+    const code = playwrightTest(sessionOf([step(1, 4500, { label: 'change input "数量"', action: change(4500, 'input "数量"'), diff: updated })]), { interactions: page.interactions() });
+    expect(code).toContain(`  await expectDbChanges(async () => {
+    await page.getByPlaceholder("数量", { exact: true }).fill("5");
+    await page.getByPlaceholder("数量", { exact: true }).blur();
+  }, {`);
+    expect(code).toContain("// 1 more action after the last step left out");
+  });
+
+  it("answers each dialog just before its action when a step has several", () => {
+    const page = recording(form).input(100, "#note", "至急").click(1000, "#save");
+    page.custom(1100, DIALOG_EVENT, { type: "confirm", message: "保存しますか？", answer: false });
+    page.click(1500, "#del").custom(1600, DIALOG_EVENT, { type: "confirm", message: "削除しますか？", answer: true });
+    const code = playwrightTest(sessionOf([step(1, 2000, { label: "done", source: "manual", diff: updated })]), { interactions: page.interactions() });
+    expect(code).toContain(`  await expectDbChanges(async () => {
+    await page.goto("/orders");
+    await page.getByPlaceholder("備考", { exact: true }).fill("至急");
+    page.once("dialog", (dialog) => dialog.dismiss()); // confirm: 保存しますか？
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    page.once("dialog", (dialog) => dialog.accept()); // confirm: 削除しますか？
+    await page.getByRole("button", { name: "削除", exact: true }).click();
+  }, {`);
+    expect(valid(code)).toEqual([]);
+  });
+
+  it("writes valid code for any column name and value, and doesn't copy secrets", () => {
+    const rows = [{ "受注・番号": 1, "item･code": "a", note: "一行目\u2028二行目\u2029", password_hash: "$2b$10$abc", api_token: "t0k3n", pwd: null, salt_len: 16 }];
+    const code = playwrightTest(sessionOf([step(1, 0, { label: "save", source: "manual", diff: diffOf({ table: { schema: "main", name: "users" }, key: [], inserted: rows }) })]));
+    expect(code).toContain(String.raw`{ "受注・番号": 1, "item･code": "a", note: "一行目\u2028二行目\u2029", password_hash: expect.any(String), api_token: expect.any(String), pwd: null, salt_len: 16 }`);
     expect(valid(code)).toEqual([]);
   });
 

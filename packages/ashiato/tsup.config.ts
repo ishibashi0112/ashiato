@@ -14,6 +14,8 @@ export default defineConfig([
     entry: { index: "src/index.ts", bin: "src/cli/bin.ts", vite: "src/vite/index.ts", playwright: "src/playwright/index.ts" },
     // CommonJS too: a vite.config.ts in a project without "type": "module" is bundled as CJS and require()s plugins
     format: ["esm", "cjs"],
+    // shared chunks in CommonJS too: else "ashiato" and "ashiato/playwright" each have their own DbChangesError, and instanceof fails across them
+    splitting: true,
     shims: true,
     dts: { entry: { index: "src/index.ts", vite: "src/vite/index.ts", playwright: "src/playwright/index.ts" } },
     // dist/ui is built separately by @ashiato/ui

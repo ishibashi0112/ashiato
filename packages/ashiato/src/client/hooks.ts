@@ -277,13 +277,14 @@ export function hookWebView(win: Window & typeof globalThis, tracker: Tracker, c
 
 /** Records clicks, form submits, value changes and Enter presses as user actions. */
 export function hookUserActions(doc: Document, tracker: Tracker): void {
-  doc.addEventListener("click", (e) => tracker.userAction("click", describe(e.target)), true);
-  doc.addEventListener("submit", (e) => tracker.userAction("submit", describe(e.target)), true);
-  doc.addEventListener("change", (e) => tracker.userAction("change", describe(e.target)), true);
+  const action = (type: string, e: Event) => tracker.userAction(type, describe(e.target), captioned(e.target));
+  doc.addEventListener("click", (e) => action("click", e), true);
+  doc.addEventListener("submit", (e) => action("submit", e), true);
+  doc.addEventListener("change", (e) => action("change", e), true);
   doc.addEventListener(
     "keydown",
     (e) => {
-      if (e.key === "Enter" && !e.isComposing) tracker.userAction("enter", describe(e.target));
+      if (e.key === "Enter" && !e.isComposing) action("enter", e);
     },
     true,
   );
@@ -308,4 +309,17 @@ export function describe(target: EventTarget | null): string | undefined {
   const text = (["input", "select", "textarea"].includes(tag) && !value ? fallback : name || fallback) ?? "";
   const short = text.replace(/\s+/g, " ").slice(0, 40);
   return short ? `${tag} "${short}"` : tag;
+}
+
+/**
+ * Whether the name `describe()` gives is the app's own wording: a button's caption or a text field's
+ * label. Not so for a link, a cell, a checkbox's label or an element with a role (a row made
+ * clickable): their text can be the data shown. Only such names reach an AI told no values.
+ */
+export function captioned(target: EventTarget | null): boolean {
+  if (!target || !(target as Element).closest) return false;
+  const el = (target as Element).closest(INTERACTIVE) ?? (target as Element);
+  if (el.hasAttribute("role")) return false;
+  if (el.tagName === "BUTTON" || el.tagName === "SELECT" || el.tagName === "TEXTAREA") return true;
+  return el.tagName === "INPUT" && !/^(checkbox|radio|hidden)$/i.test((el as HTMLInputElement).type);
 }

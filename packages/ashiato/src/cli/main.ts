@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -12,7 +12,7 @@ import { generateTest } from "../codegen/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
 import { MediaStore } from "../core/media.js";
-import { loadSession, outputFile, saveSession } from "../core/store.js";
+import { evidenceBase, loadSession, outputFile, saveSession } from "../core/store.js";
 import type { TableRef } from "../core/types.js";
 import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
 import type { Lang } from "../export/text.js";
@@ -161,9 +161,7 @@ export async function main(argv: string[]): Promise<void> {
       log: (m) => console.log(m),
     });
     // --out evidence/login.xlsx, --out evidence/login (for several formats) or --out evidence/ (a folder)
-    const out = outputFile(path, extname(path), values.out);
-    const ext = extname(out);
-    const base = EXPORT_FORMATS.includes(ext.slice(1).toLowerCase() as ExportFormat) || ext.toLowerCase() === ".json" ? out.slice(0, -ext.length) : out;
+    const base = evidenceBase(path, values.out, EXPORT_FORMATS);
     for (const [format, data] of Object.entries(files)) {
       const target = `${base}.${format}`;
       mkdirSync(dirname(target), { recursive: true });

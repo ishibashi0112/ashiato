@@ -4,7 +4,7 @@ import { connect } from "../adapters/index.js";
 import type { DbAdapter } from "../adapters/types.js";
 import { startRecording, type Recording, type RecordingOptions } from "../cli/recording.js";
 import { tableId } from "../core/diff.js";
-import { outputFile } from "../core/store.js";
+import { evidenceBase, outputFile } from "../core/store.js";
 import { EXPORT_FORMATS, type ExportFormat } from "../export/index.js";
 import type { Lang } from "../export/text.js";
 import type { McpTool } from "./mcp.js";
@@ -54,8 +54,8 @@ export function agentTools(options: AgentOptions): AgentTools {
     throw new Error("Nothing recorded yet: call start_recording first (or pass session_file).");
   };
   /** Where a file made from the session goes: `out` (a file or a folder), or next to the session file (else in the working directory). */
-  const outFile = async (s: SessionSource, ext: string, out: unknown) =>
-    outputFile(s.file ?? resolve(`ashiato-${(await s.session()).startedAt.replace(/[:.]/g, "-")}.json`), ext, typeof out === "string" && out ? out : undefined);
+  const sessionFile = async (s: SessionSource) => s.file ?? resolve(`ashiato-${(await s.session()).startedAt.replace(/[:.]/g, "-")}.json`);
+  const given = (out: unknown) => (typeof out === "string" && out ? out : undefined);
   const valuesNote = values ? "" : " Row values are not shown (the server was started without --share-values): you see tables, columns and counts.";
 
   const tools: McpTool[] = [
@@ -99,7 +99,9 @@ export function agentTools(options: AgentOptions): AgentTools {
         });
         const r = recording;
         log(`Recording to ${r.file}${r.url ? `, timeline at ${r.url}` : ""}`);
-        const skipped = r.recorder.skippedTables().map((s) => `  ${tableId(s.table)}: ${s.error ? `could not be read: ${s.error}` : `${s.rowCount} rows, more than max rows`}`);
+        // a database's error message can quote a row's value
+        const unreadable = (error: string) => (values ? `could not be read: ${error}` : "could not be read (the database's message is not shown)");
+        const skipped = r.recorder.skippedTables().map((s) => `  ${tableId(s.table)}: ${s.error ? unreadable(s.error) : `${s.rowCount} rows, more than max rows`}`);
         return [
           `Recording ${r.session.tables.length} tables on ${r.session.dialect}: baseline taken.`,
           `Session file: ${r.file}`,
@@ -172,7 +174,7 @@ export function agentTools(options: AgentOptions): AgentTools {
       async run(args) {
         const s = source(args);
         const code = await s.test(typeof args.name === "string" ? args.name : undefined);
-        const file = await outFile(s, ".spec.ts", args.out);
+        const file = outputFile(await sessionFile(s), ".spec.ts", given(args.out));
         write(file, code);
         const todos = (code.match(/\/\/ TODO/g) ?? []).length;
         const checks = (code.match(/await expectDbChanges\(/g) ?? []).length;
@@ -198,7 +200,7 @@ export function agentTools(options: AgentOptions): AgentTools {
         const unknown = formats.filter((f) => !EXPORT_FORMATS.includes(f));
         if (unknown.length) throw new Error(`Unknown format: ${unknown.join(", ")} (use ${EXPORT_FORMATS.join(", ")})`);
         const s = source(args);
-        const base = (await outFile(s, "", args.out)).replace(/\.(xlsx|pdf|html|json)$/i, "");
+        const base = evidenceBase(await sessionFile(s), given(args.out), EXPORT_FORMATS);
         const lines: string[] = [];
         for (const format of formats) {
           const { data, notes } = await s.evidence(format, { lang: args.lang === "en" || args.lang === "ja" ? (args.lang as Lang) : undefined, changedOnly: args.changed_only === true, browser: options.browser });

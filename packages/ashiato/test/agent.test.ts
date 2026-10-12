@@ -94,6 +94,9 @@ describe("MCP over stdio", () => {
       await vi.waitFor(() => expect(c.answers.length).toBe(before + 1));
     }
     expect(c.answers.slice(-4).flat()).toMatchObject(Array(4).fill({ id: null, error: { code: -32600 } }));
+    // neither a request nor a response
+    c.raw(JSON.stringify({ jsonrpc: "2.0", id: 4 }));
+    await vi.waitFor(() => expect(c.answers.at(-1)).toEqual({ jsonrpc: "2.0", id: 4, error: { code: -32600, message: "Invalid request" } }));
     expect((await c.request("ping")).result).toEqual({});
     c.end();
     await c.done;
@@ -118,7 +121,8 @@ describe("steps as text without values", () => {
     'click td "yamada.taro@example.com"',
   );
   const request = step({ type: "request", page: "/", startedAt: "2026-10-12T00:00:00.000Z", requests: [{ kind: "http", method: "POST", url: "/api/orders?customer=Yamada", status: 200 }] }, "POST /api/orders?customer=Yamada");
-  const button = step({ type: "click", target: 'button "保存"', page: "/orders", startedAt: "2026-10-12T00:00:00.000Z", requests: [] }, 'click button "保存"');
+  const button = step({ type: "click", target: 'button "保存"', caption: true, page: "/orders", startedAt: "2026-10-12T00:00:00.000Z", requests: [] }, 'click button "保存"');
+  const clicked = (target: string) => stepLine(step({ type: "click", target, startedAt: "2026-10-12T00:00:00.000Z", requests: [] }, `click ${target}`), { values: false });
 
   it("leaves out the clicked text, URL queries and error messages, but keeps buttons' captions", () => {
     const texts = [stepText(click), stepLine(click, { values: false }), JSON.stringify(stepShape(click)), stepLine(request, { values: false }), JSON.stringify(stepShape(request))];
@@ -128,9 +132,26 @@ describe("steps as text without values", () => {
     expect(stepText(click)).toContain("requests: POST /api/orders?… 200; WebView2 call save failed: (message not shown)");
     expect(stepLine(request, { values: false })).toBe("#1 POST /api/orders?…: no changes");
     expect(stepLine(button, { values: false })).toBe('#1 click button "保存": no changes');
+    // a text the browser didn't mark as a caption: a row made clickable (role=button), ARIA fallback roles, an empty role
+    expect(clicked('button "Yamada Taro yamada.taro@example.com"')).toBe("#1 click button: no changes");
+    expect(clicked('button link "Sato Ichiro"')).toBe("#1 click button link: no changes");
+    expect(clicked(' "Sato Ichiro"')).toBe("#1 click: no changes");
     // with values: as recorded
     expect(stepLine(click)).toContain('click td "yamada.taro@example.com"');
     expect(stepText(click, { values: true })).toContain("save failed: The duplicate key value is (1042).");
+  });
+
+  it("leaves out a database's error message about a table it could not read", () => {
+    const skipped: Step = {
+      ...button,
+      skipped: [
+        { table: { name: "profile" }, reason: "could not be read: Conversion failed when converting the varchar value 'A12' to data type int." },
+        { table: { name: "logs" }, reason: "200000 rows (more than max rows 100000)" },
+      ],
+    };
+    for (const t of [stepText(skipped), JSON.stringify(stepShape(skipped))]) expect(t).not.toContain("A12");
+    expect(stepText(skipped)).toContain("not compared: profile (could not be read (the database's message is not shown))\nnot compared: logs (200000 rows (more than max rows 100000))");
+    expect(stepText(skipped, { values: true })).toContain("varchar value 'A12'");
   });
 });
 
@@ -185,8 +206,13 @@ describe("tools for AI agents", () => {
 
   it("writes into a folder given as out, and leaves no session behind when the port is taken", async () => {
     const { out, c } = setup();
-    await c.call("start_recording");
+    const session = /Session file: (.+\.json)/.exec(await c.call("start_recording"))![1]!;
     await c.call("checkpoint");
+    // not over the session's own files
+    await expect(c.call("generate_test", { out: session })).rejects.toThrow(`${session} is a file of the session itself: write to another file`);
+    await expect(c.call("generate_test", { out: session.replace(/\.json$/, ".replay.ndjson") })).rejects.toThrow("is a file of the session itself");
+    // evidence named after the session file: its extension is replaced
+    expect(await c.call("export_evidence", { formats: ["html"], out: session })).toBe(`Wrote ${session.replace(/\.json$/, ".html")}`);
     expect(await c.call("generate_test", { out: join(out, "tests") + "/" })).toMatch(new RegExp(`^Wrote ${join(out, "tests")}/[^/]+\\.spec\\.ts:`));
     mkdirSync(join(out, "evidence"));
     expect(await c.call("export_evidence", { formats: ["html"], out: join(out, "evidence") })).toMatch(new RegExp(`^Wrote ${join(out, "evidence")}/[^/]+\\.html$`));

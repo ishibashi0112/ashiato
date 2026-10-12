@@ -18,14 +18,18 @@ const NOW_MS = 36 * 3600_000;
 /** An action's trigger is looked for this long around the moment the action started. */
 const TRIGGER_BEFORE_MS = 100;
 const TRIGGER_AFTER_MS = 300;
+/** A change event comes this soon after the select or check that made it (a fill is over before it). */
+const CHANGE_AFTER_MS = 50;
 /** Requests with no user action, this soon after a page load, were made by the page load. */
 const PAGE_LOAD_MS = 5000;
 
-const q = (s: string) => JSON.stringify(s);
+/** A string literal (line and paragraph separators escaped: in a comment they would end it). */
+const q = (s: string) => JSON.stringify(s).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 /** For a comment: on one line. */
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
-const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u;
-const key = (s: string) => (IDENTIFIER.test(s) ? s : q(s));
+const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$]*$/u;
+/** An object key, unquoted when TypeScript takes it as a name (it doesn't know the newer ・ and ･ as part of one). */
+const key = (s: string) => (IDENTIFIER.test(s) && !/[\u30fb\uff65]/.test(s) ? s : q(s));
 
 /**
  * A Playwright test that does again what was done while recording (from the screen replay) and,
@@ -105,13 +109,15 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
     for (const s of step.skipped ?? []) {
       // a table too large at every step is said once
       const said = `${tableId(s.table)} ${s.reason.replace(/\d+/g, "")}`;
-      if (!skippedSaid.has(said)) emit(`// ${tableId(s.table)} not compared: ${s.reason}`);
+      if (!skippedSaid.has(said)) emit(`// ${tableId(s.table)} not compared: ${oneLine(s.reason)}`);
       skippedSaid.add(said);
     }
     if (step.action?.requests.some((r) => r.kind !== "http")) emit("// sent to the desktop app (WebView2): run the test against the app hosting this page");
-    for (const i of body) if (i.tab === tab) for (const l of dialogLines(i.dialogs ?? [])) emit(l);
+    // the dialogs of one action are answered before the step; with several actions, each answers its own just before it
+    const single = body.length === 1;
+    if (single && body[0]!.tab === tab) for (const l of dialogLines(body[0]!.dialogs ?? [])) emit(l);
     const expected = expectation(step, values, session.tables);
-    const run = body.flatMap((i) => lines_({ ...i, dialogs: undefined }));
+    const run = body.flatMap((i) => lines_(single ? { ...i, dialogs: undefined } : i));
     // one call, with no comment after it
     if (run.length === 1 && run[0]!.startsWith("await ") && run[0]!.endsWith(";") && !todo) {
       emit(`await expectDbChanges(() => ${run[0]!.replace(/^await /, "").replace(/;$/, "")}, ${expected});`);
@@ -160,7 +166,9 @@ function findTrigger(list: Interaction[], from: number, started: number, type: s
       case "submit":
         return i.kind === "click" || i.kind === "press";
       case "change":
-        return i.kind === "fill" || i.kind === "select" || i.kind === "check" || i.kind === "uncheck";
+        // typing in the next field right after leaving this one is not it
+        if (i.kind === "fill") return i.t <= started;
+        return (i.kind === "select" || i.kind === "check" || i.kind === "uncheck") && i.t <= started + CHANGE_AFTER_MS;
       default:
         return i.kind !== "goto";
     }
@@ -328,6 +336,8 @@ class Values {
     if (inserted && typeof v === "string" && UUID.test(v)) return any;
     // SQL Server rowversion: a new number, counted for the whole database, on every write
     if (this.session.dialect === "mssql" && typeof v === "string" && ROWVERSION.test(v)) return any;
+    // a password's hash, salt or a token is made anew each time (and a password in plain text is better left out of the test)
+    if (typeof v === "string" && SECRET_COLUMN.test(column)) return any;
     if (this.isNow(v) || this.refersToNew(t, column, String(v))) return any;
     return typeof v === "string" ? q(v) : String(v);
   }
@@ -366,6 +376,8 @@ class Values {
 }
 
 const ROWVERSION = /^0x[0-9a-f]{16}$/i;
+/** password, password_hash, pwd, salt, api_token, secret_key, パスワード */
+const SECRET_COLUMN = /password|passwd|pwd|hash|salt|token|secret|パスワード/i;
 const UUID = /^(?:0x)?[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const DATE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*(Z|[+-]\d{2}(?::?\d{2})?)?)?$/;
 /** customer_id, customerId, 受注ID */

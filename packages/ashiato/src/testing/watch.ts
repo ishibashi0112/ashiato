@@ -78,6 +78,7 @@ export class DbWatcher {
       if (this.closing) throw new Error("this database watcher is closed");
       checkExpectation(expected);
       checkOptions(options);
+      checkTimes(this.options, "watcher option");
     } catch (e) {
       return Promise.reject(e);
     }
@@ -153,7 +154,8 @@ export class DbWatcher {
         const waited = Math.round(o.timeout / 1000 * 10) / 10;
         throw new DbChangesError(
           `Database changes don't match (waited ${waited}s after the action):\n\n${result.problems.map((p) => `  ${p}`).join("\n")}\n\nChanges found:\n${describeDiff(diff)}`,
-          diff,
+          // a copy: its rows are the snapshot the next call compares from
+          structuredClone(diff),
         );
       }
       await sleep(o.pollMs);
@@ -167,7 +169,7 @@ function watchedIn(baseline: Snapshot, now: Snapshot): WatchedTable[] {
   return now.tables.map((t) => {
     const b = base.get(tableId(t.table));
     const why = (s: { error?: string; rowCount: number }) => (s.error ? `it could not be read: ${s.error}` : `it has ${s.rowCount} rows (more than maxRows)`);
-    if (t.skipped) return { table: t.table, skipped: why(t) };
+    if (t.skipped) return { table: t.table, skipped: why(t), ...(b && !b.skipped ? { lost: true } : {}) };
     if (b?.skipped) return { table: t.table, skipped: `${why(b)} before the action` };
     return { table: t.table };
   });
@@ -180,6 +182,15 @@ function checkOptions(options: unknown): void {
   if (typeof options !== "object" || options === null) throw new TypeError("options must be an object: { timeout, settleMs, pollMs }");
   const other = Object.keys(options).filter((k) => !EXPECT_OPTIONS.includes(k));
   if (other.length) throw new TypeError(`${other.join(", ")} can't be set per call, only for the watcher (test.use({ ashiato: { ... } }) or watchDb()). Per call: ${EXPECT_OPTIONS.join(", ")}`);
+  checkTimes(options as ExpectOptions, "option");
+}
+
+/** A timeout of NaN (`Number(process.env.X)` unset) or "1000" would never be reached: waiting would never end. */
+function checkTimes(options: ExpectOptions, what: string): void {
+  for (const k of EXPECT_OPTIONS) {
+    const v = options[k as keyof ExpectOptions];
+    if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) throw new TypeError(`${what} ${k} must be a number of milliseconds (got ${typeof v === "string" ? JSON.stringify(v) : String(v)})`);
+  }
 }
 
 const defined = <T extends object>(o: T): Partial<T> => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;

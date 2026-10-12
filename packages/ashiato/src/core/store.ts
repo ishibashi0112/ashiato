@@ -15,7 +15,20 @@ export function outputFile(sessionFile: string, ext: string, out?: string): stri
   const name = `${basename(sessionFile).replace(/\.json$/i, "")}${ext}`;
   if (!out) return join(dirname(sessionFile), name);
   const target = resolve(out);
-  return /[/\\]$/.test(out) || statSync(target, { throwIfNoEntry: false })?.isDirectory() ? join(target, name) : target;
+  const file = /[/\\]$/.test(out) || statSync(target, { throwIfNoEntry: false })?.isDirectory() ? join(target, name) : target;
+  // the session's own files (its replay and videos are named after it) are not overwritten
+  const same = (a: string) => (process.platform === "win32" || process.platform === "darwin" ? a.toLowerCase() : a);
+  const base = same(resolve(sessionFile).replace(/\.json$/i, ""));
+  if (same(file) === same(resolve(sessionFile)) || same(file).startsWith(`${base}.replay.`) || same(file).startsWith(`${base}.video-`)) {
+    throw new Error(`${file} is a file of the session itself: write to another file`);
+  }
+  return file;
+}
+
+/** Evidence files without their extension: `out` may name one (`evidence/login.xlsx`), all of them (`evidence/login`) or a folder. */
+export function evidenceBase(sessionFile: string, out: string | undefined, formats: readonly string[]): string {
+  const ext = new RegExp(`\\.(${[...formats, "json"].join("|")})$`, "i");
+  return outputFile(sessionFile, "", out?.replace(ext, "") || undefined);
 }
 
 export function saveSession(file: string, session: Session): void {

@@ -5,7 +5,7 @@ Records which rows an app inserts, updates and deletes, using read-only (SELECT-
 ## Hard rules
 - Adapters must work with SELECT permission only: no triggers, no CDC, no temp tables, no setting changes. CDC / Flashback may only ever be optional extras.
 - Everything runs locally; never send data anywhere. The server binds to 127.0.0.1.
-- The MCP server's answers go to an AI (maybe in the cloud): row values, URL queries, the text of clicked elements other than buttons and fields, and the app's error messages are left out unless it was started with `--share-values`; files it writes (tests, evidence) are returned as paths only.
+- The MCP server's answers go to an AI (maybe in the cloud): row values, URL queries, the text of clicked elements other than buttons' captions and text fields' labels (the browser marks those: `ActionInfo.caption`), and the app's and database's error messages are left out unless it was started with `--share-values`; files it writes (tests, evidence) are returned as paths only.
 - Database drivers (mssql, oracledb, pg, mysql2) are optional peer dependencies loaded with `loadDriver()`.
 
 ## Layout

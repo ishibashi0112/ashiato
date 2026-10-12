@@ -42,7 +42,7 @@ export async function serveMcp(tools: McpTool[], info: McpServerInfo, io: { inpu
     const fail = (code: number, message: string) => ({ jsonrpc: "2.0", id: (typeof m === "object" && m !== null ? m.id : undefined) ?? null, error: { code, message } });
     if (typeof m !== "object" || m === null || typeof m.method !== "string") {
       // a response to a request of ours (there are none), or not a message at all
-      return m && typeof m === "object" && "id" in m && !("method" in m) ? undefined : fail(-32600, "Invalid request");
+      return m && typeof m === "object" && "id" in m && !("method" in m) && ("result" in m || "error" in m) ? undefined : fail(-32600, "Invalid request");
     }
     // notifications (initialized, cancelled) need no answer
     if (m.id === undefined) return undefined;

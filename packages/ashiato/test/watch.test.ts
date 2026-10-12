@@ -111,7 +111,33 @@ describe("expectChanges", () => {
     await expect(watcher.expectChanges(() => (ran = true), { big: { inserted: 1 } })).rejects.toThrow(
       "big can't be compared: it has 2 rows (more than maxRows)",
     );
+    // a time that would never be reached (an unset environment variable through Number(), text)
+    await expect(watcher.expectChanges(() => (ran = true), {}, { timeout: Number(undefined) })).rejects.toThrow("option timeout must be a number of milliseconds (got NaN)");
+    await expect(watcher.expectChanges(() => (ran = true), {}, { settleMs: "100" } as never)).rejects.toThrow('option settleMs must be a number of milliseconds (got "100")');
+    await expect(watchDb(db, { timeout: Infinity }).expectChanges(() => (ran = true), {})).rejects.toThrow("watcher option timeout must be a number");
     expect(ran).toBe(false);
+  });
+
+  it("fails when a table not listed can no longer be read: it may have changed", async () => {
+    const db = new FakeDb();
+    db.create("orders", ["id"]);
+    db.create("audit", ["id"]);
+    watcher = watchDb(db, { settleMs: 20, timeout: 200, pollMs: 20 });
+    await expect(
+      watcher.expectChanges(() => {
+        db.insert("orders", { id: 1 });
+        db.unreadable.add("audit");
+      }, { orders: { inserted: 1 } }),
+    ).rejects.toThrow("audit can't be compared, so whether it changed is unknown: it could not be read: permission denied for table audit");
+  });
+
+  it("returns rows that can be changed without changing what the next call compares from", async () => {
+    const db = new FakeDb();
+    db.create("orders", ["id"], Array.from({ length: 2000 }, (_, i) => ({ id: i + 1, note: "a" })));
+    watcher = watchDb(db, { settleMs: 20, pollMs: 20 });
+    const changes = await watcher.expectChanges(() => db.insert("orders", { id: 5000, note: "b" }), { orders: { inserted: 1 } });
+    changes.orders!.inserted[0]!.note = "c";
+    await watcher.expectChanges(() => db.update("orders", (r) => r.id === 5000, { note: "c" }), { orders: { updated: [{ where: { id: 5000 }, set: { note: "c" } }] } });
   });
 
   it("compares from before the action when reading only the parts that changed", async () => {
