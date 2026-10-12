@@ -73,7 +73,8 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
       if (k >= 0) {
         write(before(0, k));
         const i = interactions[cursor++]!;
-        body = [typed >= 0 ? { ...i, blur: true } : i];
+        // the change of a text field fires when it is left
+        body = [action.type === "change" && i.kind === "fill" ? { ...i, blur: true } : i];
       } else {
         write(before(started));
         todo = oneLine(`${action.type}${action.target ? ` ${action.target}` : ""} (not found in the screen replay)`);
