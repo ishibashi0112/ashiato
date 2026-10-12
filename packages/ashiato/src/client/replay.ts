@@ -1,4 +1,5 @@
 import { record } from "rrweb";
+import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT, RESNAPSHOT_EVENT } from "./events.js";
 
 export interface ReplayOptions {
   /** Mask the value of every input (passwords are always masked). Default false. */
@@ -39,7 +40,8 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
     snapshotBatch = sent;
     nextSnapshot = Date.now() + gap;
     gap = Math.min(gap * 2, MAX_SNAPSHOT_GAP_MS);
-    record.takeFullSnapshot();
+    // as a checkout: the same page, not a page load
+    record.takeFullSnapshot(true);
   };
   let lastPost = 0;
   const flush = (final = false) => {
@@ -51,22 +53,83 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
     void post(body, final).then((reply) => onReply(batch, reply), () => undefined);
   };
   record({
-    emit(event) {
+    emit(event, isCheckout) {
+      // a snapshot taken again of the same page: say so before it (its meta event comes first)
+      if (isCheckout && event.type === META) buffer.push({ type: CUSTOM, timestamp: event.timestamp, data: { tag: RESNAPSHOT_EVENT, payload: {} } });
       buffer.push(event);
       if (buffer.length >= FLUSH_EVENTS) flush();
     },
     maskAllInputs: options.maskAllInputs ?? false,
     // a fresh full snapshot now and then keeps seeking in long single-page sessions fast
     checkoutEveryNms: 5 * 60_000,
-    // fewer mouse-move and scroll events; clicks and inputs are always recorded
-    sampling: { mousemove: 50, scroll: 150, input: "last" },
+    // fewer mouse-move and scroll events; clicks and inputs are always recorded, inputs as they are
+    // typed (a test generated from the replay types them where the user did, as in a search box)
+    sampling: { mousemove: 50, scroll: 150 },
     errorHandler: () => true,
+    // tests generated from the replay leave out values the app set itself
+    userTriggeredOnInput: true,
   });
+  recordForTests(win, options.maskAllInputs ?? false);
   win.setInterval(() => flush(), FLUSH_MS);
   win.addEventListener("pagehide", () => flush(true));
   win.document.addEventListener("visibilitychange", () => {
     if (win.document.visibilityState === "hidden") flush(true);
   });
+}
+
+const NOT_TEXT = new Set(["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "hidden"]);
+/** Inputs a test tool fills by setting the value from a script (Playwright's fill() on a date field), as a component may too. */
+const SET_BY_SCRIPT = new Set(["date", "time", "datetime-local", "month", "week", "color", "range"]);
+const META = 4;
+const CUSTOM = 5;
+
+/**
+ * Records the answers to alert / confirm / prompt (a test has to give the same ones), Enter
+ * presses (they submit forms) and options picked by a script, as custom replay events.
+ */
+function recordForTests(win: Window, mask: boolean): void {
+  const add = (tag: string, payload: unknown) => {
+    try {
+      record.addCustomEvent(tag, payload);
+    } catch {
+      // not recording
+    }
+  };
+  for (const type of ["alert", "confirm", "prompt"] as const) {
+    const original = win[type] as (...args: unknown[]) => unknown;
+    if (typeof original !== "function") continue;
+    win[type] = function (this: unknown, ...args: unknown[]) {
+      const answer = original.apply(this, args);
+      const masked = mask && typeof answer === "string" ? "*".repeat(answer.length) : answer;
+      add(DIALOG_EVENT, { type, message: String(args[0] ?? ""), ...(type === "alert" ? {} : { answer: masked }) });
+      return answer;
+    } as never;
+  }
+  win.document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Enter" || e.isComposing || !e.isTrusted) return;
+      const target = e.target as HTMLInputElement | null;
+      // not in the replay (rrweb's block class)
+      if (!target || target.closest?.(".rr-block")) return;
+      // the field's value: rrweb gets it from the change event that comes after the key, and masks it as rrweb does
+      // (a password field shown as text by a "show password" button is still one), or leaves it out (ignore class)
+      const field = target.tagName === "TEXTAREA" || (target.tagName === "INPUT" && !NOT_TEXT.has(target.type));
+      const secret = mask || target.type === "password" || target.hasAttribute("data-rr-is-password");
+      const value = field && !target.classList.contains("rr-ignore") ? (secret ? "*".repeat(target.value.length) : target.value) : undefined;
+      add(KEY_EVENT, { key: "Enter", id: record.mirror.getId(target as Node), ...(value !== undefined ? { value } : {}) });
+    },
+    true,
+  );
+  win.document.addEventListener(
+    "change",
+    (e) => {
+      const target = e.target as HTMLInputElement | null;
+      if (e.isTrusted || !target) return;
+      if (target.tagName === "SELECT" || (target.tagName === "INPUT" && SET_BY_SCRIPT.has(target.type))) add(CHANGE_EVENT, { id: record.mirror.getId(target) });
+    },
+    true,
+  );
 }
 
 const TAB_KEY = "__ashiato_tab";

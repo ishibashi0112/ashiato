@@ -18,6 +18,7 @@
     "postgres",
     "mysql",
     "sqlite",
+    "playwright",
     "vite-plugin",
     "webview2"
   ],
@@ -47,6 +48,16 @@
         "types": "./dist/vite.d.cts",
         "default": "./dist/vite.cjs"
       }
+    },
+    "./playwright": {
+      "import": {
+        "types": "./dist/playwright.d.ts",
+        "default": "./dist/playwright.js"
+      },
+      "require": {
+        "types": "./dist/playwright.d.cts",
+        "default": "./dist/playwright.cjs"
+      }
     }
   },
   "files": [
@@ -61,6 +72,7 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
+    "@playwright/test": ">=1.40",
     "mssql": ">=11",
     "mysql2": ">=3",
     "oracledb": ">=6",
@@ -68,6 +80,9 @@
     "vite": ">=5"
   },
   "peerDependenciesMeta": {
+    "@playwright/test": {
+      "optional": true
+    },
     "mssql": {
       "optional": true
     },
@@ -85,6 +100,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "@types/mssql": "^12.3.0",
     "@types/node": "^22.20.5",
     "@types/oracledb": "^7.0.3",

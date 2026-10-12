@@ -217,15 +217,30 @@ describe("Tracker", () => {
     expect(sent.map((p) => p.label)).toEqual(["outside actions", 'click button "Save"']);
   });
 
-  it("labels a field change followed by a click on Save by the click", async () => {
-    const t = make();
+  it("labels a field change followed by a click on Save by the click, and says when the click came", async () => {
+    let clock = 1_000_000;
+    const t = make({ now: () => clock });
     t.userAction("change", 'input "quantity"');
-    await flush(80);
-    t.userAction("click", 'button "Save"');
+    clock += 80;
+    t.userAction("click", 'button "Save"', true);
     const a = t.beginRequest({ kind: "http", method: "POST", url: "/save" });
     a.end();
     await flush(200);
-    expect(sent.at(-1)).toMatchObject({ label: 'click button "Save"', action: { type: "click", target: 'button "Save"' } });
+    expect(sent.at(-1)).toMatchObject({
+      label: 'click button "Save"',
+      action: { type: "click", target: 'button "Save"', caption: true, startedAt: new Date(1_000_000).toISOString(), lastAt: new Date(1_000_080).toISOString() },
+    });
+
+    // the click's target takes the place of the field's, and so does whether its text is a caption
+    clock += 1000;
+    t.userAction("change", 'input "quantity"', true);
+    clock += 80;
+    t.userAction("click", 'button "Suzuki Hanako"');
+    const b = t.beginRequest({ kind: "http", method: "POST", url: "/save" });
+    b.end();
+    await flush(200);
+    expect(sent.at(-1)?.action).toMatchObject({ target: 'button "Suzuki Hanako"' });
+    expect(sent.at(-1)?.action?.caption).toBeUndefined();
   });
 
   it("keeps a request made after a long confirm() with its click", async () => {

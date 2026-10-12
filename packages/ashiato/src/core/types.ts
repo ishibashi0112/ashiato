@@ -83,11 +83,15 @@ export interface ActionInfo {
   type: string;
   /** Human-readable target, e.g. `button "Save"`. */
   target?: string;
+  /** The target's text is the app's own wording (a button's caption, a text field's label), not data: an AI told no values sees it. */
+  caption?: boolean;
   /** Page path when the action happened. */
   page?: string;
   /** Browser tab the action happened in; matches the tab of its screen replay events. */
   tab?: string;
   startedAt: string;
+  /** When the last of the user's events taken as this one action happened (a click after a change, Enter pressed again), if not at startedAt. */
+  lastAt?: string;
   requests: RequestInfo[];
 }
 
@@ -117,6 +121,14 @@ export interface VideoInfo {
   endedAt?: string;
 }
 
+export interface SessionOptions {
+  /** The tables asked for (`--tables`), when not all. */
+  tables?: string[];
+  ignoreColumns?: string[];
+  /** When not the default (100,000). */
+  maxRows?: number;
+}
+
 export interface Session {
   version: 1;
   id: string;
@@ -124,6 +136,8 @@ export interface Session {
   dialect: string;
   /** Tables watched as of the latest step (tables created while recording are added). */
   tables: TableRef[];
+  /** The recorder's options that decide what the steps show (tests generated from the session use them too). */
+  options?: SessionOptions;
   steps: Step[];
   /** Screen replay (rrweb DOM events, one JSON batch per line), next to the session file. */
   replay?: { file: string };

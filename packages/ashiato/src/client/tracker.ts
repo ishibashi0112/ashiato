@@ -145,8 +145,8 @@ export class Tracker {
     return this.o.oneWayMs;
   }
 
-  /** Called for clicks, submits, changes and Enter presses. */
-  userAction(type: string, target: string | undefined): void {
+  /** Called for clicks, submits, changes and Enter presses. `caption`: the target's text is the app's own wording (see `captioned()`). */
+  userAction(type: string, target: string | undefined, caption = false): void {
     const now = this.o.now();
     const cur = this.current;
     this.inUserTask = true;
@@ -159,8 +159,12 @@ export class Tracker {
         // "change input" + "click Save": the click says what the user did
         cur.info.type = type;
         cur.info.target = target;
+        if (caption) cur.info.caption = true;
+        else delete cur.info.caption;
         cur.label = labelOf(type, target);
       }
+      // the last of them is the one that sends the requests: a test generated from the recording does that one
+      cur.info.lastAt = new Date(now).toISOString();
       return;
     }
     // The previous action is only waiting for its settle time: take its checkpoint now, so this
@@ -171,6 +175,7 @@ export class Tracker {
       before = this.finish(cur);
     }
     this.current = this.newAction(type, target, false);
+    if (caption) this.current.info.caption = true;
     this.current.before = before;
   }
 

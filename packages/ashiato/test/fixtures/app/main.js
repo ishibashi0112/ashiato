@@ -39,3 +39,15 @@ document.getElementById("xhr-cancel").addEventListener("click", () => {
   // re-opening cancels the request (Chromium fires no loadend for it); nothing is sent after that
   setTimeout(() => xhr.open("POST", "/api/slow"), 100);
 });
+
+// asks first; Enter in the quantity orders too
+const order = async () => {
+  if (!confirm("注文しますか？")) return;
+  const body = JSON.stringify({ item: Number(document.getElementById("item").value), qty: Number(document.getElementById("qty").value) });
+  await fetch("/api/stock", { method: "POST", headers: { "content-type": "application/json" }, body });
+  done("ordered");
+};
+document.getElementById("order").addEventListener("click", order);
+document.getElementById("qty").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") order();
+});
