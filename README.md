@@ -108,6 +108,96 @@ npx ashiato export .ashiato/sessions/2026-10-11T04-00-00-000Z.json --format xlsx
 | `--no-screens` | No screenshots |
 | `--browser <path>` | Chrome / Edge to use (or set `ASHIATO_BROWSER`) |
 
+## Database checks in Playwright tests
+
+`expectDbChanges(action, expected)` runs an action and checks what it changed in the database, with the same read-only access. Install `@playwright/test` next to ashiato.
+
+```ts
+// tests/orders.spec.ts
+import { test, expect } from "ashiato/playwright";
+
+test.use({ ashiato: { ignoreColumns: ["updated_at"] } }); // the database: ASHIATO_DB_URL, or ashiato: { db: "..." }
+
+test("placing an order", async ({ page, expectDbChanges }) => {
+  await page.goto("/orders/new");
+  await page.getByLabel("Quantity").fill("10");
+  const changes = await expectDbChanges(() => page.getByRole("button", { name: "Save" }).click(), {
+    orders: { inserted: [{ id: expect.any(Number), customer_id: 7, qty: 10 }] },
+    stock: { updated: [{ where: { item_id: 3 }, set: { qty: 40 } }] },
+  });
+  expect(changes.orders.inserted[0].id).toBeGreaterThan(0);
+});
+```
+
+- It reads the watched tables before the action, runs it, then waits until the changes stop for `settleMs` (300 ms) and match, for up to `timeout` (5 s).
+- Every table listed must change exactly as described, and **no other watched table may change**. `{}` checks that nothing changed; `orders: {}` that `orders` didn't.
+- `inserted` / `deleted` are rows or a count (`inserted: 300`). `updated` rows are `{ where, set }`: `where` picks the row, and `set` lists every column the update changed (leave columns like `updated_at`, and SQL Server `rowversion` columns, to `ignoreColumns`). Only the columns you give are compared, names in any case, and Playwright's `expect.any()`, `expect.stringContaining()` and the like work in them.
+- When it fails, the error says which rows and columns differ, lists changes the expectation doesn't mention, and shows everything that changed. It points at your test's line, as a step named `expect database changes: orders +1, stock ~1`.
+- Run tests that check the same database one at a time (`--workers=1`): parallel tests would see each other's writes.
+- Options (`test.use({ ashiato })`, or per call as the third argument): `db`, `tables`, `ignoreColumns`, `maxRows`, `timeout`, `settleMs`.
+- Without Playwright: `import { watchDb } from "ashiato"`, then `await watchDb(url).expectChanges(action, expected)`.
+
+## Tests from a recording
+
+A recording can be turned into a Playwright test that does again what was done in the browser and checks, step by step, that the same rows change: click **⤓ Playwright test** in the timeline, or:
+
+```sh
+npx ashiato codegen .ashiato/sessions/2026-10-11T04-00-00-000Z.json   # writes ...000Z.spec.ts next to it
+```
+
+```ts
+test("recorded 2026-10-11 13:00", async ({ page, expectDbChanges }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("Customer name", { exact: true }).fill("Suzuki Trading");
+
+  // #1 click button "Add customer" (POST /api/customers)
+  await expectDbChanges(() => page.getByRole("button", { name: "Add customer", exact: true }).click(), {
+    customers: {
+      inserted: [{ id: expect.any(Number), name: "Suzuki Trading", created_at: expect.any(String) }],
+    },
+  });
+  ...
+```
+
+- The clicks, typing, options picked, checkboxes, Enter presses and page loads come from the screen replay (the Vite plugin records it). Elements are found the way Playwright recommends: test id, role and name, label, placeholder, text, then an id or attribute, checked to be unique on the page at that moment.
+- Answers to `alert` / `confirm` / `prompt` are given back the same way (`page.once("dialog", ...)`).
+- Values the database makes up are matched with `expect.any()`: keys of new rows, columns referring to them (`order_id`), UUIDs in new rows, SQL Server row versions, and dates near the time of the recording. Steps with more than 20 rows of a kind are checked by count.
+- Before running it, put the database back in the state it was in when recording started, and set `ASHIATO_DB_URL`. Steps sent through WebView2 need the page hosted by your desktop app (or a stand-in for `chrome.webview`). Without a screen replay, the actions are left as `TODO`s.
+- Typed passwords and masked inputs (`maskAllInputs`) are not in the replay: they become `TODO`s.
+
+## For AI agents (CLI / MCP)
+
+An AI agent working on your app can record the database while it works and read what each step changed.
+
+**MCP server.** Add it to your agent (Claude Code: `claude mcp add ashiato -- npx ashiato mcp --db <url>`):
+
+```sh
+npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--share-values]
+npx ashiato mcp --recorder http://127.0.0.1:4100   # read a running `ashiato record` instead
+```
+
+| Tool | |
+| --- | --- |
+| `list_tables` | Tables, row counts and primary keys |
+| `start_recording` | Baseline snapshot; starts the timeline on `--port`, so the Vite plugin turns each action in the app into a step |
+| `checkpoint` | A step now: what changed since the previous one |
+| `list_steps`, `get_step` | The steps, one line each, or one in full (action, requests, changed rows) |
+| `stop_recording` | Saves the session file |
+| `generate_test` | Writes a Playwright test from the recording (see above) |
+| `export_evidence` | Writes Excel / PDF / HTML evidence |
+
+**Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values and no URL queries. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
+
+**CLI.** For scripts, and agents that run commands:
+
+```sh
+npx ashiato checkpoint "ran the import" [--recorder http://127.0.0.1:4100] [--json] [--no-values]
+npx ashiato steps [session.json] [--since 3] [--full] [--json] [--no-values]
+npx ashiato tables --db <url> --json
+```
+
+`checkpoint` and `steps` talk to a running `ashiato record` (default `http://127.0.0.1:4100`), or `steps` reads a saved session. They show values unless `--no-values` is given.
+
 ## Large tables
 
 Only the first snapshot reads every row. After that, the database splits each table into buckets of about 256 rows and returns a row count and a checksum per bucket. Only buckets whose checksum changed are read again, so a checkpoint where nothing changed transfers almost nothing. It is all plain `SELECT`s: no setting changes, no extra permissions.
@@ -175,6 +265,7 @@ The recorder listens on `127.0.0.1` only.
 | `POST /api/video`, `/api/video/:id/chunk`, `/api/video/:id/stop` | Screen recording upload (from the timeline UI only) |
 | `GET /api/video/:id` | A screen recording (supports `Range`) |
 | `GET /api/export?format=xlsx\|pdf\|html&lang=ja&changedOnly=1` | Evidence file (requests from the timeline page only) |
+| `GET /api/export?format=playwright&name=...` | A Playwright test made from the session (requests from the timeline page only) |
 
 Other web pages open in your browser can call `POST /api/checkpoint` and `POST /api/replay` (the app under test runs on another origin), but they can't read recorded rows, replays or videos back.
 
@@ -193,7 +284,7 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 3. ✅ Screen replay (rrweb) and screen recording synced with the timeline
 4. ✅ Faster checkpoints for large tables: re-read only the buckets whose checksum changed (`xmin`, `rowversion`, `ORA_ROWSCN`, row hashes)
 5. ✅ Evidence export (Excel / PDF) with screenshots of each step
-6. `expectDbChanges()` for Playwright, export recordings as tests, CLI / MCP server for AI agents
+6. ✅ `expectDbChanges()` for Playwright, tests generated from recordings, CLI / MCP server for AI agents
 
 ## Development
 
@@ -292,6 +383,82 @@ npx ashiato export .ashiato/sessions/2026-10-11T04-00-00-000Z.json --format xlsx
 | `--no-screens` | 画面キャプチャを付けない |
 | `--browser <パス>` | 使う Chrome / Edge(`ASHIATO_BROWSER` でも指定できます) |
 
+### Playwright のテストでDBを確かめる
+
+`expectDbChanges(操作, 期待)` は、操作を実行して、それでDBがどう変わったかを同じ参照権限だけで確かめます。ashiato と一緒に `@playwright/test` をインストールしてください。
+
+```ts
+// tests/orders.spec.ts
+import { test, expect } from "ashiato/playwright";
+
+test.use({ ashiato: { ignoreColumns: ["updated_at"] } }); // DB は ASHIATO_DB_URL、または ashiato: { db: "..." }
+
+test("注文する", async ({ page, expectDbChanges }) => {
+  await page.goto("/orders/new");
+  await page.getByLabel("数量").fill("10");
+  const changes = await expectDbChanges(() => page.getByRole("button", { name: "保存" }).click(), {
+    orders: { inserted: [{ id: expect.any(Number), customer_id: 7, qty: 10 }] },
+    stock: { updated: [{ where: { item_id: 3 }, set: { qty: 40 } }] },
+  });
+  expect(changes.orders.inserted[0].id).toBeGreaterThan(0);
+});
+```
+
+- 操作の前に対象テーブルを読み、操作を実行してから、変更が `settleMs`(300ミリ秒)止まって期待と合うまで、最大 `timeout`(5秒)待ちます
+- 書いたテーブルはすべて書いたとおりに変わる必要があり、**書いていない対象テーブルが変わると失敗**します。`{}` は「何も変わらない」、`orders: {}` は「orders は変わらない」を確かめます
+- `inserted` / `deleted` は行のリストか件数(`inserted: 300`)、`updated` は `{ where, set }` のリストです。`where` で行を選び、`set` にはその更新で変わった列をすべて書きます(`updated_at` のような列や SQL Server の `rowversion` 列は `ignoreColumns` に)。書いた列だけを比べ(列名の大文字・小文字は問いません)、Playwright の `expect.any()` や `expect.stringContaining()` なども使えます
+- 失敗すると、どの行のどの列が違うか、期待にない変更、実際に変わったものすべてをエラーに出します。エラーはテスト自身の行を指し、レポートには `expect database changes: orders +1, stock ~1` というステップで表示されます
+- 同じDBを確かめるテストは1つずつ実行してください(`--workers=1`)。並列だとお互いの書き込みが見えてしまいます
+- オプション(`test.use({ ashiato })`、または呼び出しごとに第3引数):`db`・`tables`・`ignoreColumns`・`maxRows`・`timeout`・`settleMs`
+- Playwright なしでも使えます:`import { watchDb } from "ashiato"` して `await watchDb(url).expectChanges(操作, 期待)`
+
+### 記録からテストを作る
+
+記録したセッションから、ブラウザでの操作をもう一度行い、ステップごとに同じ行が変わるかを確かめる Playwright のテストを作れます。タイムライン画面の **⤓ Playwright test** を押すか、次のコマンドを実行します。
+
+```sh
+npx ashiato codegen .ashiato/sessions/2026-10-11T04-00-00-000Z.json   # 隣に ...000Z.spec.ts を書き出します
+```
+
+- クリック・入力・選択・チェック・Enter・ページ移動は、画面リプレイ(Viteプラグインが記録)から取り出します。要素は Playwright 推奨の順(テストID → ロールと名前 → ラベル → プレースホルダ → テキスト → id や属性)で、その時点のページで1つに決まるものを使います
+- `alert` / `confirm` / `prompt` には、記録時と同じ応答を返します(`page.once("dialog", ...)`)
+- DB が決める値は `expect.any()` で比べます:新しい行のキー、それを参照する列(`order_id` など)、新しい行の UUID、SQL Server の行バージョン、記録時刻付近の日時です。1つの種類で20行を超えるステップは件数で確かめます
+- 実行する前に、DB を記録開始時の状態に戻し、`ASHIATO_DB_URL` を設定してください。WebView2 経由のステップは、ページをデスクトップアプリ(または `chrome.webview` の代役)の中で動かす必要があります。画面リプレイがない場合、操作は `TODO` になります
+- パスワードと伏せ字にした入力(`maskAllInputs`)はリプレイにないので `TODO` になります
+
+### AIエージェント向け(CLI / MCP)
+
+アプリを開発中のAIエージェントが、作業しながらDBを記録し、各ステップで何が変わったかを読めます。
+
+**MCPサーバー**:エージェントに登録します(Claude Code なら `claude mcp add ashiato -- npx ashiato mcp --db <url>`)。
+
+```sh
+npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--share-values]
+npx ashiato mcp --recorder http://127.0.0.1:4100   # 起動中の ashiato record を読む場合
+```
+
+| ツール | |
+| --- | --- |
+| `list_tables` | テーブル・行数・主キー |
+| `start_recording` | 基準のスナップショットを取り、`--port` でタイムラインを起動します。Viteプラグインがアプリの操作ごとにステップを作ります |
+| `checkpoint` | 今の時点でステップを作ります(前のステップからの変更) |
+| `list_steps`・`get_step` | ステップの一覧(1行ずつ)、または1つの詳細(操作・通信・変わった行) |
+| `stop_recording` | セッションファイルを保存します |
+| `generate_test` | 記録から Playwright のテストを書き出します(上記) |
+| `export_evidence` | Excel / PDF / HTML の証跡を書き出します |
+
+**行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値とURLのクエリは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
+
+**CLI**:スクリプトや、コマンドを実行するエージェント向けです。
+
+```sh
+npx ashiato checkpoint "取り込みを実行" [--recorder http://127.0.0.1:4100] [--json] [--no-values]
+npx ashiato steps [session.json] [--since 3] [--full] [--json] [--no-values]
+npx ashiato tables --db <url> --json
+```
+
+`checkpoint` と `steps` は起動中の `ashiato record`(既定 `http://127.0.0.1:4100`)と通信します。`steps` は保存済みのセッションも読めます。`--no-values` を付けない限り値を表示します。
+
 ### 大きなテーブル
 
 全件を読むのは最初のスナップショットだけです。以降は、DB側で各テーブルを約256行ずつのバケットに分け、バケットごとの行数とチェックサムを返します。チェックサムが変わったバケットだけを読み直すので、何も変わっていないチェックポイントではほとんど通信しません。使うのは通常の `SELECT` だけで、設定変更も追加の権限も不要です。
@@ -336,7 +503,7 @@ npx ashiato export .ashiato/sessions/2026-10-11T04-00-00-000Z.json --format xlsx
 3. ✅ タイムラインと同期した画面リプレイ(rrweb)・画面録画
 4. ✅ 大きなテーブル向けの高速化:チェックサムが変わったバケットだけを読み直す(`xmin`・`rowversion`・`ORA_ROWSCN`・行ハッシュ)
 5. ✅ テスト証跡の出力(Excel / PDF)。各ステップの画面キャプチャ付き
-6. Playwright 向け `expectDbChanges()`、記録からのテストコード書き出し、AIエージェント向けの CLI / MCP サーバー
+6. ✅ Playwright 向け `expectDbChanges()`、記録からのテストコード生成、AIエージェント向けの CLI / MCP サーバー
 
 ## License
 

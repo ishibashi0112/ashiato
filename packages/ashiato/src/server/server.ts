@@ -147,7 +147,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
     const session = o.getSession();
     if (format === "playwright") {
       // a test that does the recording again and checks the same rows change
-      const code = await generateTest(session, { media: o.media, sessionFile: o.sessionFile && basename(o.sessionFile) });
+      const code = await generateTest(session, { media: o.media, sessionFile: o.sessionFile && basename(o.sessionFile), name: url.searchParams.get("name") || undefined });
       res.writeHead(200, {
         "Content-Type": "text/plain; charset=utf-8",
         "Content-Disposition": `attachment; filename="ashiato-${session.startedAt.replace(/[:.]/g, "-")}.spec.ts"`,
