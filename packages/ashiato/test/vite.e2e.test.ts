@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Browser, Page } from "playwright-core";
 import { createServer, type ViteDevServer } from "vite";
 import { connect } from "../src/adapters/index.js";
+import { generateTest } from "../src/codegen/index.js";
 import { MediaStore } from "../src/core/media.js";
 import { exportEvidence } from "../src/export/index.js";
 import { Recorder } from "../src/core/recorder.js";
@@ -97,6 +98,16 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
                   const { id } = JSON.parse(body) as { id: number };
                   app.db.prepare("INSERT OR IGNORE INTO orders (id, customer_id, qty, updated_at) VALUES (?, 9, 1, 'now')").run(id);
                   send({ id });
+                });
+                return;
+              }
+              if (req.url === "/api/stock" && req.method === "POST") {
+                let body = "";
+                req.on("data", (chunk) => (body += chunk));
+                req.on("end", () => {
+                  const { item, qty } = JSON.parse(body) as { item: number; qty: number };
+                  app.db.prepare("UPDATE stock SET qty = qty - ? WHERE item_id = ?").run(qty, item);
+                  send({ ok: true });
                 });
                 return;
               }
@@ -206,6 +217,50 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
       .filter(Boolean)
       .map((l) => JSON.parse(l) as { tab: string; events: { type: number; timestamp: number; data: { source?: number; type?: number } }[] });
   };
+
+  it("records what was typed, picked and answered, for a test made from the recording", async () => {
+    await page.getByPlaceholder("数量").fill("2");
+    // Playwright picks options with untrusted events, like a script would
+    await page.getByLabel("品目").selectOption("4");
+    page.once("dialog", (d) => void d.accept());
+    await page.getByRole("button", { name: "注文" }).click();
+    const clicked = await stepNamed('click button "注文"');
+    // dismissed: no request, no step
+    page.once("dialog", (d) => void d.dismiss());
+    await page.getByPlaceholder("数量").press("Enter");
+    page.once("dialog", (d) => void d.accept());
+    await page.getByPlaceholder("数量").fill("1");
+    await page.getByPlaceholder("数量").press("Enter");
+    await expect.poll(() => recorder.session.steps.filter((s) => s.action?.type === "enter").length, { timeout: 10_000 }).toBe(1);
+    expect(table(clicked, "stock")!.updated).toEqual([expect.objectContaining({ key: { item_id: 4 }, changed: ["qty"] })]);
+
+    // the replay is written in batches
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 1500)));
+    const code = await generateTest(recorder.session, { media: serverOptions.media });
+    const qty = (step: Step) => table(step, "stock")!.updated[0]!.after.qty;
+    expect(code).toContain(`  await page.getByPlaceholder("数量", { exact: true }).fill("2");
+  await page.getByLabel("品目", { exact: true }).selectOption("4");
+
+  // #${clicked.id} click button "注文" (POST /api/stock)
+  page.once("dialog", (dialog) => dialog.accept()); // confirm: 注文しますか？
+  await expectDbChanges(() => page.getByRole("button", { name: "注文", exact: true }).click(), {
+    stock: {
+      updated: [{ where: { item_id: 4 }, set: { qty: ${qty(clicked)} } }],
+    },
+  });`);
+    // dismissed: nothing changed
+    expect(code).toMatch(/page\.once\("dialog", \(dialog\) => dialog\.dismiss\(\)\); \/\/ confirm: 注文しますか？\n {2}await page\.getByPlaceholder\("数量", \{ exact: true \}\)\.press\("Enter"\);/);
+    expect(code).toContain(`  await page.getByPlaceholder("数量", { exact: true }).fill("1");
+`);
+    const entered = recorder.session.steps.find((s) => s.action?.type === "enter")!;
+    expect(code).toContain(`  page.once("dialog", (dialog) => dialog.accept()); // confirm: 注文しますか？
+  await expectDbChanges(() => page.getByPlaceholder("数量", { exact: true }).press("Enter"), {
+    stock: {
+      updated: [{ where: { item_id: 4 }, set: { qty: ${qty(entered)} } }],
+    },
+  });`);
+    expect(qty(entered)).toBe(Number(qty(clicked)) - 1);
+  }, 30_000);
 
   it("records the page for screen replay, in the same tab as the actions", async () => {
     const step = await stepNamed('click button "保存"');
@@ -394,6 +449,11 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
       const file = await download.path();
       expect(readFileSync(file).subarray(0, 2).toString()).toBe(ext === "xlsx" ? "PK" : "%P");
     }
+    const [download] = await Promise.all([ui.waitForEvent("download"), ui.getByRole("button", { name: "⤓ Playwright test" }).click()]);
+    expect(download.suggestedFilename()).toMatch(/^ashiato-.+\.spec\.ts$/);
+    const spec = readFileSync(await download.path(), "utf8");
+    expect(spec).toContain('import { test, expect } from "ashiato/playwright";');
+    expect(spec).toContain('await expectDbChanges(() => page.getByRole("button", { name: "注文", exact: true }).click(), {');
     expect(await ui.locator("header .del").count()).toBe(0);
     await ui.close();
   }, 60_000);

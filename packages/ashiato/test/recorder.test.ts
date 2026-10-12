@@ -41,7 +41,8 @@ describe("Recorder", () => {
     const { file, db } = createAppDb();
     adapter = await connect(`sqlite:${file}`);
     const recorder = new Recorder(adapter, { ignoreColumns: ["updated_at"] });
-    await recorder.start();
+    // tests generated from the session watch the database the same way
+    expect((await recorder.start()).options).toEqual({ ignoreColumns: ["updated_at"] });
 
     db.exec("INSERT INTO orders VALUES (1042, 7, 10, '2026-10-11'); UPDATE stock SET qty = 40 WHERE item_id = 3; INSERT INTO audit_log VALUES ('saved')");
     const save = await recorder.checkpoint("click Save");

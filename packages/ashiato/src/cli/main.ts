@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { connect } from "../adapters/index.js";
+import { generateTest } from "../codegen/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
 import { MediaStore } from "../core/media.js";
@@ -21,6 +22,7 @@ Usage:
   ashiato record --db <url> [--tables a,b] [--ignore-columns updated_at] [--port 4100] [--no-ui]
   ashiato show <session.json> [--port 4100]
   ashiato export <session.json> [--format xlsx,pdf,html] [--out <file>] [--lang ja|en] [--changed-only] [--no-screens]
+  ashiato codegen <session.json> [--out <file>] [--name <title>]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
@@ -44,6 +46,10 @@ Export (evidence of a saved session):
   --changed-only          Leave out steps that changed no rows
   --no-screens            No screenshots of the screen replay / recordings
   --browser <path>        Chrome / Edge used for PDF and screenshots (or set ASHIATO_BROWSER)
+
+Codegen (a Playwright test made from a saved session, using ashiato/playwright):
+  --out <file>            Output file, or - for the terminal (default: next to the session file, .spec.ts)
+  --name <title>          The test's title (default: "recorded <date>")
 
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
@@ -80,6 +86,7 @@ export async function main(argv: string[]): Promise<void> {
       "changed-only": { type: "boolean" },
       "no-screens": { type: "boolean" },
       browser: { type: "string" },
+      name: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -130,6 +137,24 @@ export async function main(argv: string[]): Promise<void> {
       console.log(`Wrote ${target}`);
     }
     for (const n of notes) console.log(`Note: ${n}`);
+    return;
+  }
+
+  if (command === "codegen") {
+    const file = rest[0];
+    if (!file) throw new Error("Usage: ashiato codegen <session.json> [--out <file>]");
+    const path = resolve(file);
+    const session = loadSession(path);
+    const media = new MediaStore(path, session, undefined, true);
+    const code = await generateTest(session, { media, sessionFile: basename(path), name: values.name });
+    if (values.out === "-") return void process.stdout.write(code);
+    const out = values.out ? resolve(values.out) : path.replace(/(\.json)?$/i, ".spec.ts");
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, code);
+    console.log(`Wrote ${out}`);
+    if (!media.replayPath()) {
+      console.log("Note: the session has no screen replay, so the test's actions are left as TODOs. Record with the Vite plugin to get them.");
+    }
     return;
   }
 

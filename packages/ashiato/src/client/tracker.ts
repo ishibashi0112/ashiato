@@ -161,6 +161,8 @@ export class Tracker {
         cur.info.target = target;
         cur.label = labelOf(type, target);
       }
+      // the last of them is the one that sends the requests: a test generated from the recording does that one
+      cur.info.lastAt = new Date(now).toISOString();
       return;
     }
     // The previous action is only waiting for its settle time: take its checkpoint now, so this

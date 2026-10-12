@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import type { DbAdapter } from "../adapters/types.js";
 import { diffSnapshots, tableId } from "./diff.js";
 import { TableReader } from "./reader.js";
-import type { ActionInfo, Session, SkippedTable, Snapshot, Step, TableRef, TableSnapshot } from "./types.js";
+import type { ActionInfo, Session, SessionOptions, SkippedTable, Snapshot, Step, TableRef, TableSnapshot } from "./types.js";
 
 export { selectTables } from "./reader.js";
 
@@ -52,6 +52,7 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
       startedAt: new Date().toISOString(),
       dialect: db.dialect,
       tables: [],
+      ...sessionOptions(options),
       steps: [],
     };
   }
@@ -120,6 +121,15 @@ export class Recorder extends EventEmitter<{ step: [Step]; ready: [Session] }> {
       .filter((t) => t.skipped)
       .map((t) => ({ table: t.table, rowCount: t.rowCount, ...(t.error ? { error: t.error } : {}) }));
   }
+}
+
+function sessionOptions(o: RecorderOptions): { options?: SessionOptions } {
+  const options: SessionOptions = {
+    ...(o.tables?.length ? { tables: o.tables } : {}),
+    ...(o.ignoreColumns?.length ? { ignoreColumns: o.ignoreColumns } : {}),
+    ...(o.maxRows !== undefined && o.maxRows !== 100_000 ? { maxRows: o.maxRows } : {}),
+  };
+  return Object.keys(options).length ? { options } : {};
 }
 
 /** Tables that couldn't be compared between two snapshots: skipped in either one. */

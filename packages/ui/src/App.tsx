@@ -36,7 +36,7 @@ export function App() {
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [hideEmpty, setHideEmpty] = useState(false);
-  const [exporting, setExporting] = useState<"xlsx" | "pdf">();
+  const [exporting, setExporting] = useState<"xlsx" | "pdf" | "playwright">();
   const [replay, setReplay] = useState<ReplayTabs>(new Map());
   const [replayVersion, setReplayVersion] = useState(0);
   const replayState = useRef<ReplayState>(emptyReplay());
@@ -133,8 +133,8 @@ export function App() {
     }
   }
 
-  /** Downloads the evidence of the session (the steps shown in the list) as Excel or PDF. */
-  async function exportAs(format: "xlsx" | "pdf") {
+  /** Downloads the evidence of the session (the steps shown in the list) as Excel or PDF, or a Playwright test made from it. */
+  async function exportAs(format: "xlsx" | "pdf" | "playwright") {
     setExporting(format);
     setNotice(undefined);
     try {
@@ -181,6 +181,14 @@ export function App() {
           </button>
           <button type="button" disabled={Boolean(exporting)} onClick={() => void exportAs("pdf")} title="Evidence of the steps listed, as a PDF (printed by Chrome / Edge)">
             {exporting === "pdf" ? "Exporting…" : "⤓ PDF"}
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(exporting)}
+            onClick={() => void exportAs("playwright")}
+            title="A Playwright test that does the recorded clicks and typing again and checks that the same rows change"
+          >
+            {exporting === "playwright" ? "Exporting…" : "⤓ Playwright test"}
           </button>
         </span>
         {session.live && (

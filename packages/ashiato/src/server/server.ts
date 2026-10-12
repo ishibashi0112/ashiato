@@ -1,7 +1,8 @@
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { basename, extname, join, normalize } from "node:path";
 import { pipeline } from "node:stream";
+import { generateTest } from "../codegen/index.js";
 import { countChanges } from "../core/diff.js";
 import type { MediaStore } from "../core/media.js";
 import type { CheckpointOptions } from "../core/recorder.js";
@@ -142,9 +143,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, o: ServerOption
     // recorded rows go into the file, and a PDF starts a browser: only the timeline itself may ask
     const site = req.headers["sec-fetch-site"];
     if (crossOrigin || (site !== undefined && site !== "same-origin" && site !== "none")) return sendJson(res, 403, { error: "Forbidden origin" });
-    const format = (url.searchParams.get("format") ?? "xlsx") as ExportFormat;
-    if (!EXPORT_FORMATS.includes(format)) throw new HttpError(400, `Unknown format: ${format}`);
+    const format = (url.searchParams.get("format") ?? "xlsx") as ExportFormat | "playwright";
     const session = o.getSession();
+    if (format === "playwright") {
+      // a test that does the recording again and checks the same rows change
+      const code = await generateTest(session, { media: o.media, sessionFile: o.sessionFile && basename(o.sessionFile) });
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Disposition": `attachment; filename="ashiato-${session.startedAt.replace(/[:.]/g, "-")}.spec.ts"`,
+        "Cache-Control": "no-store",
+      });
+      return void res.end(code);
+    }
+    if (!EXPORT_FORMATS.includes(format)) throw new HttpError(400, `Unknown format: ${format}`);
     const { files, notes } = await exportOne(() =>
       exportEvidence(session, {
         formats: [format],
