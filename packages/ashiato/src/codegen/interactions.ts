@@ -1,4 +1,4 @@
-import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT } from "../client/events.js";
+import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT, RESNAPSHOT_EVENT } from "../client/events.js";
 import { Dom, isElement, type DomNode } from "./dom.js";
 import { locatorFor, type Locator } from "./locator.js";
 
@@ -43,6 +43,8 @@ export interface Interaction {
   masked?: boolean;
   /** goto: the page went there by itself, right after an action (a link, a redirect after saving). */
   followed?: boolean;
+  /** fill: then leave the field, as the user did (a page that saves on `change`). */
+  blur?: boolean;
   /** Dialogs the action opened, with the user's answers. */
   dialogs?: Dialog[];
   node?: number;
@@ -52,6 +54,8 @@ export interface Interaction {
 const FOLLOW_MS = 5000;
 /** A change event and the value it is about are this close together. */
 const PICKED_MS = 1000;
+/** Enter on a form's field or a button clicks its button this soon after. */
+const KEY_CLICK_MS = 100;
 const TEXT_TYPES = new Set(["", "text", "email", "password", "search", "tel", "url", "number", "date", "time", "datetime-local", "month", "week", "color"]);
 
 /** What the user did in each tab of a screen replay, in order. */
@@ -65,6 +69,8 @@ function tabInteractions(tab: string, events: ReplayEvent[]): Interaction[] {
   const out: Interaction[] = [];
   const dom = new Dom();
   let loading = false;
+  /** The next full snapshot is of the same page, taken again. */
+  let again = false;
   let href: string | undefined;
   let url: string | undefined;
   /** Values set by a script, kept in case a change event says a test tool or component picked them. */
@@ -94,23 +100,28 @@ function tabInteractions(tab: string, events: ReplayEvent[]): Interaction[] {
       changed.clear();
       texts.clear();
       committed.clear();
-      // a page load (not a snapshot taken again of the same page)
-      if (href && (loading || url === undefined || href !== url)) {
+      // a page load, not a snapshot taken again of the same page (marked so since it was recorded,
+      // else told by its URL: a single-page app that moved on then reads as a page load)
+      if (href && (loading || url === undefined || (href !== url && !again))) {
         const before = lastAction();
         const followed = url !== undefined && before !== undefined && e.timestamp - before.t < FOLLOW_MS;
         out.push({ t: e.timestamp, tab, kind: "goto", value: href, ...(followed ? { followed } : {}) });
-        url = href;
       }
+      if (href) url = href;
       loading = false;
+      again = false;
     } else if (e.type === INCREMENTAL && data.source === MUTATION) dom.mutate(data as never);
-    else if (e.type === INCREMENTAL && data.source === MOUSE && data.type === CLICK) click(e.timestamp, dom.get(data.id as number));
+    else if (e.type === INCREMENTAL && data.source === MOUSE && data.type === CLICK) click(e.timestamp, dom.get(data.id as number), data);
     else if (e.type === INCREMENTAL && data.source === MOUSE && data.type === DBL_CLICK) dblclick(e.timestamp, data.id as number);
     else if (e.type === INCREMENTAL && data.source === INPUT) input(e.timestamp, dom.get(data.id as number), data);
     else if (e.type === CUSTOM) custom(e.timestamp, data.tag, (data.payload ?? {}) as Record<string, unknown>);
   }
   return out;
 
-  function click(t: number, node: DomNode | undefined) {
+  function click(t: number, node: DomNode | undefined, data: Record<string, unknown>) {
+    // the click Enter makes on a form's button (or on the button it was pressed on): pressing it again does that
+    const last = out.at(-1);
+    if (data.x === 0 && data.y === 0 && last?.kind === "press" && t - last.t <= KEY_CLICK_MS) return;
     if (node && isElement(node)) {
       const type = (node.attrs.get("type") ?? "").toLowerCase();
       // typing fills a field, and checking a box or picking an option comes as its own input event
@@ -124,7 +135,8 @@ function tabInteractions(tab: string, events: ReplayEvent[]): Interaction[] {
     // the browser sends click, click, dblclick: one double click
     const clicks = out.slice(-2).filter((i) => i.kind === "click" && i.node === id && t - i.t < 1000);
     if (clicks.length === 0) return;
-    out.splice(out.indexOf(clicks[0]!), clicks.length, { ...clicks[0]!, kind: "dblclick" });
+    // at the second click: the action it made is stamped then
+    out.splice(out.indexOf(clicks[0]!), clicks.length, { ...clicks[0]!, kind: "dblclick", t });
   }
 
   function input(t: number, node: DomNode | undefined, data: Record<string, unknown>) {
@@ -143,27 +155,34 @@ function tabInteractions(tab: string, events: ReplayEvent[]): Interaction[] {
       }
     }
     const type = (node.attrs.get("type") ?? "").toLowerCase();
+    // rrweb masks passwords (also one a "show password" button made a text field) and, with maskAllInputs, every value
+    const masked = type === "password" || node.attrs.has("data-rr-is-password") || (text.length > 0 && /^\*+$/.test(text));
     let item: Interaction;
-    if (node.tag === "select") item = { t, tab, kind: "select", value: text, ...at(node) };
+    if (node.tag === "select") item = { t, tab, kind: "select", value: masked ? "" : text, ...(masked ? { masked } : {}), ...at(node) };
     else if (node.tag === "input" && (type === "checkbox" || type === "radio")) {
       // a radio button is unchecked by checking another one
       if (type === "radio" && !data.isChecked) return;
       item = { t, tab, kind: data.isChecked ? "check" : "uncheck", ...at(node) };
     } else if (node.tag === "textarea" || (node.tag === "input" && TEXT_TYPES.has(type))) {
-      const masked = type === "password" || (text.length > 0 && /^\*+$/.test(text));
       texts.set(node.id, text);
+      const last = out.at(-1);
+      // typing, then more typing in the same field: the same element, found as before
+      if (last?.kind === "fill" && last.node === node.id && !last.unsupported) {
+        const { value: _, masked: __, ...found } = last;
+        return void out.splice(-1, 1, { ...found, t, value: masked ? "" : text, ...(masked ? { masked } : {}) });
+      }
       item = { t, tab, kind: "fill", value: masked ? "" : text, ...(masked ? { masked } : {}), ...at(node) };
     } else if (node.tag === "input") {
       item = { t, tab, kind: "fill", value: text, ...at(node), unsupported: `an input of type ${type} can't be filled in` };
     } else return;
     const last = out.at(-1);
-    // typing, then more typing in the same field
-    if (last?.kind === item.kind && last.node === item.node && item.kind === "fill") return void out.splice(-1, 1, item);
+    if (item.kind === "fill" && last?.kind === "fill" && last.node === item.node) return void out.splice(-1, 1, item);
     out.push(item);
   }
 
   function custom(t: number, tag: unknown, payload: Record<string, unknown>) {
-    if (tag === CHANGE_EVENT) {
+    if (tag === RESNAPSHOT_EVENT) again = true;
+    else if (tag === CHANGE_EVENT) {
       const id = payload.id as number;
       const held = programmatic.get(id);
       programmatic.delete(id);

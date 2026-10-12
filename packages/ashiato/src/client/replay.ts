@@ -1,5 +1,5 @@
 import { record } from "rrweb";
-import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT } from "./events.js";
+import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT, RESNAPSHOT_EVENT } from "./events.js";
 
 export interface ReplayOptions {
   /** Mask the value of every input (passwords are always masked). Default false. */
@@ -40,7 +40,8 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
     snapshotBatch = sent;
     nextSnapshot = Date.now() + gap;
     gap = Math.min(gap * 2, MAX_SNAPSHOT_GAP_MS);
-    record.takeFullSnapshot();
+    // as a checkout: the same page, not a page load
+    record.takeFullSnapshot(true);
   };
   let lastPost = 0;
   const flush = (final = false) => {
@@ -52,7 +53,9 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
     void post(body, final).then((reply) => onReply(batch, reply), () => undefined);
   };
   record({
-    emit(event) {
+    emit(event, isCheckout) {
+      // a snapshot taken again of the same page: say so before it (its meta event comes first)
+      if (isCheckout && event.type === META) buffer.push({ type: CUSTOM, timestamp: event.timestamp, data: { tag: RESNAPSHOT_EVENT, payload: {} } });
       buffer.push(event);
       if (buffer.length >= FLUSH_EVENTS) flush();
     },
@@ -75,6 +78,8 @@ export function startReplay(win: Window, tab: string, post: Post, options: Repla
 }
 
 const NOT_TEXT = new Set(["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "hidden"]);
+const META = 4;
+const CUSTOM = 5;
 
 /**
  * Records the answers to alert / confirm / prompt (a test has to give the same ones), Enter
@@ -102,10 +107,14 @@ function recordForTests(win: Window, mask: boolean): void {
     "keydown",
     (e) => {
       if (e.key !== "Enter" || e.isComposing || !e.isTrusted) return;
-      // the field's value: rrweb gets it from the change event that comes after the key
       const target = e.target as HTMLInputElement | null;
-      const field = target?.tagName === "TEXTAREA" || (target?.tagName === "INPUT" && !NOT_TEXT.has(target.type));
-      const value = field ? (mask || target.type === "password" ? "*".repeat(target.value.length) : target.value) : undefined;
+      // not in the replay (rrweb's block class)
+      if (!target || target.closest?.(".rr-block")) return;
+      // the field's value: rrweb gets it from the change event that comes after the key, and masks it as rrweb does
+      // (a password field shown as text by a "show password" button is still one), or leaves it out (ignore class)
+      const field = target.tagName === "TEXTAREA" || (target.tagName === "INPUT" && !NOT_TEXT.has(target.type));
+      const secret = mask || target.type === "password" || target.hasAttribute("data-rr-is-password");
+      const value = field && !target.classList.contains("rr-ignore") ? (secret ? "*".repeat(target.value.length) : target.value) : undefined;
       add(KEY_EVENT, { key: "Enter", id: record.mirror.getId(target as Node), ...(value !== undefined ? { value } : {}) });
     },
     true,

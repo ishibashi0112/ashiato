@@ -262,6 +262,26 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     expect(qty(entered)).toBe(Number(qty(clicked)) - 1);
   }, 30_000);
 
+  it("keeps a password masked after a show-password button made it a text field", async () => {
+    await page.evaluate(() => {
+      const p = document.createElement("p");
+      p.id = "login";
+      p.innerHTML = `<input id="pw" type="password" placeholder="パスワード"><button id="show" type="button">表示</button>`;
+      document.body.append(p);
+      p.querySelector("#show")!.addEventListener("click", () => void ((document.querySelector("#pw") as HTMLInputElement).type = "text"));
+    });
+    await page.locator("#pw").fill("s3cret");
+    await page.locator("#show").click();
+    await page.locator("#pw").fill("s3cret2");
+    await page.locator("#pw").press("Enter");
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 1500)));
+    const replay = readFileSync(serverOptions.media!.replayPath()!, "utf8");
+    expect(replay).toContain('"tag":"ashiato/key","payload":{"key":"Enter","id":');
+    expect(replay).toContain('"value":"*******"');
+    expect(replay).not.toContain("s3cret");
+    await page.evaluate(() => document.querySelector("#login")!.remove());
+  }, 30_000);
+
   it("records the page for screen replay, in the same tab as the actions", async () => {
     const step = await stepNamed('click button "保存"');
     expect(step.action?.tab).toMatch(/^\w+$/);
@@ -367,6 +387,8 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
     // the page's own snapshot, taken when it loaded, went to the recorder before the restart
     const sent = async () => (await replayEvents()).filter((b) => b.tab === tab).flatMap((b) => b.events).some((e) => e.type === 2);
     await expect.poll(sent, { timeout: 5000 }).toBe(true);
+    // a page loaded just before (the reload above) sends its first batch within a second
+    await page.waitForTimeout(1500);
     const before = serverOptions.media!;
     const restarted = new MediaStore(join(mkdtempSync(join(tmpdir(), "ashiato-e2e-")), "session.json"), recorder.session);
     serverOptions.media = restarted;
@@ -382,6 +404,11 @@ describe.skipIf(!canRun)("Vite plugin in a real browser", () => {
       // one is enough: the batches already on their way when it was taken get the same answer
       await page.waitForTimeout(2500);
       expect(snapshots()).toBe(1);
+      // marked as the same page taken again, not a page load (for tests made from the recording)
+      const events = readFileSync(restarted.replayPath()!, "utf8").split("\n").filter(Boolean).flatMap((l) => (JSON.parse(l) as { tab: string; events: { type: number; data?: unknown }[] }).events);
+      const full = events.findIndex((e) => e.type === 2);
+      expect(events.slice(full - 2, full).map((e) => e.type)).toEqual([5, 4]);
+      expect(events[full - 2]!.data).toEqual({ tag: "ashiato/resnapshot", payload: {} });
     } finally {
       serverOptions.media = before;
     }

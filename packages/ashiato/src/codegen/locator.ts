@@ -1,4 +1,4 @@
-import { inFrame, isElement, normalize, textOf, type Dom, type DomNode } from "./dom.js";
+import { hiddenItself, inFrame, isElement, normalize, textOf, type Dom, type DomNode } from "./dom.js";
 
 export interface Locator {
   /** Code that finds the element, after `page.`: `getByRole("button", { name: "Save", exact: true })`. */
@@ -10,13 +10,18 @@ export interface Locator {
 interface Candidate {
   code: string;
   matches: (n: DomNode) => boolean;
-  /** Playwright's getByRole leaves out hidden elements; other locators count them too. */
+  /**
+   * Playwright's getByRole leaves out hidden elements; other locators count them too. Elements
+   * hidden by a stylesheet look visible here, so a position among them is taken with `includeHidden`.
+   */
   visibleOnly: boolean;
 }
 
 const q = (s: string) => JSON.stringify(s);
 /** For a CSS attribute selector in single quotes (the code then needs no escaped double quotes). */
-const cssValue = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+const cssValue = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\a ").replace(/\r/g, "\\d ");
+/** The same role locator, counting hidden elements too. */
+const includingHidden = (code: string) => (code.endsWith(")") && code.includes(", {") ? code.replace(/ }\)$/, ", includeHidden: true })") : code.replace(/\)$/, ", { includeHidden: true })"));
 
 /** Roles a test finds by their name. */
 const NAMED_ROLES = new Set(["button", "link", "checkbox", "radio", "switch", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem"]);
@@ -43,10 +48,10 @@ export function locatorFor(dom: Dom, target: DomNode): Locator | { unsupported: 
     if (!c.matches(el)) continue;
     const found = (c.visibleOnly ? visible : all).filter((n) => c.matches(n));
     if (found.length === 1) return { code: c.code, label };
-    const index = found.indexOf(el);
+    const index = (c.visibleOnly ? all.filter((n) => c.matches(n)) : found).indexOf(el);
     if (!fallback && index >= 0) fallback = { c, index };
   }
-  if (fallback) return { code: `${fallback.c.code}.nth(${fallback.index})`, label };
+  if (fallback) return { code: `${fallback.c.visibleOnly ? includingHidden(fallback.c.code) : fallback.c.code}.nth(${fallback.index})`, label };
   const same = all.filter((n) => n.tag === el.tag);
   return { code: `locator(${q(el.tag)}).nth(${same.indexOf(el)})`, label };
 }
@@ -87,7 +92,9 @@ function candidatesFor(el: DomNode, names: Names): Candidate[] {
   // a clickable cell, list item or div: by its own text
   if (!role && !FIELDS.has(tag)) {
     const text = textOf(el, false);
-    if (text && text.length <= MAX_NAME) out.push({ code: `getByText(${q(text)}, { exact: true })`, matches: (n) => ownText(n) === text, visibleOnly: false });
+    // Playwright's getByText also finds <input type=submit> and <input type=button> by their value
+    const button = (n: DomNode) => n.tag === "input" && /^(submit|button)$/i.test(n.attrs.get("type") ?? "") && normalize(n.attrs.get("value") ?? "") === text;
+    if (text && text.length <= MAX_NAME) out.push({ code: `getByText(${q(text)}, { exact: true })`, matches: (n) => ownText(n) === text || button(n), visibleOnly: false });
   }
   const title = attr("title");
   if (title) out.push({ code: `getByTitle(${q(title)}, { exact: true })`, matches: (n) => n.attrs.get("title") === title, visibleOnly: false });
@@ -119,10 +126,7 @@ function ownText(n: DomNode): string | undefined {
 /** Hidden by an attribute or an inline style (stylesheets aren't looked at). */
 function hidden(n: DomNode): boolean {
   if (n.tag === "input" && n.attrs.get("type")?.toLowerCase() === "hidden") return true;
-  for (let p: DomNode | undefined = n; p && isElement(p); p = p.parent) {
-    if (p.attrs.has("hidden") || p.attrs.get("aria-hidden") === "true") return true;
-    if (/(^|;)\s*(display\s*:\s*none|visibility\s*:\s*hidden)/i.test(p.attrs.get("style") ?? "")) return true;
-  }
+  for (let p: DomNode | undefined = n; p && isElement(p); p = p.parent) if (hiddenItself(p)) return true;
   return false;
 }
 
@@ -189,7 +193,7 @@ class Names {
 
   private computeName(n: DomNode): string {
     const labelledBy = this.labelledBy(n);
-    if (labelledBy) return normalize(labelledBy.map((l) => textOf(l)).join(" "));
+    if (labelledBy) return normalize(labelledBy.map((l) => textOf(l, true, true)).join(" "));
     const label = this.label(n);
     if (label) return label;
     if (n.tag === "input") {
@@ -199,7 +203,7 @@ class Names {
       return normalize(n.attrs.get("title") ?? "");
     }
     if (FIELDS.has(n.tag)) return normalize(n.attrs.get("title") ?? "");
-    return textOf(n) || normalize(n.attrs.get("title") ?? "");
+    return textOf(n, true, true) || normalize(n.attrs.get("title") ?? "");
   }
 
   private computeLabels(n: DomNode): string[] {

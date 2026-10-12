@@ -12,3 +12,8 @@ export const KEY_EVENT = "ashiato/key";
  * a dropdown component, not set by the app. rrweb records such a change as not made by the user.
  */
 export const CHANGE_EVENT = "ashiato/change";
+/**
+ * Comes right before a full snapshot taken again of the same page (every few minutes, or when the
+ * recorder asks): it is not a page load, though the URL may differ (a single-page app moved on).
+ */
+export const RESNAPSHOT_EVENT = "ashiato/resnapshot";

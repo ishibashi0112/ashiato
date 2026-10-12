@@ -90,10 +90,14 @@ export class Dom {
     }
   }
 
-  /** Every element, in document order. */
+  /** Every element of the page, in document order: not those of its frames, nor of its <head> (a test doesn't find those). */
   *elements(from = this.root): Generator<DomNode> {
     if (!from) return;
-    if (from.type === ELEMENT) yield from;
+    if (from.type === DOCUMENT && from.parent) return;
+    if (from.type === ELEMENT) {
+      if (from.tag === "head") return;
+      yield from;
+    }
     for (const c of from.children) yield* this.elements(c);
   }
 
@@ -135,12 +139,14 @@ export function inFrame(n: DomNode): boolean {
 /**
  * The text of a node, whitespace collapsed (scripts and styles left out). With `alt`, images count
  * by their alt text, as in accessible names (Playwright's text and label matching leaves them out).
+ * With `name`, hidden parts (an icon marked aria-hidden) are left out, as in accessible names.
  */
-export function textOf(n: DomNode, alt = true): string {
+export function textOf(n: DomNode, alt = true, name = false): string {
   const parts: string[] = [];
   const walk = (x: DomNode) => {
     if (x.type === TEXT) parts.push(x.text);
     if (x.type === ELEMENT && (x.tag === "script" || x.tag === "style" || x.tag === "noscript" || x.tag === "template")) return;
+    if (name && x !== n && x.type === ELEMENT && hiddenItself(x)) return;
     if (alt && x.type === ELEMENT && x.tag === "img" && x.attrs.get("alt")) parts.push(` ${x.attrs.get("alt")} `);
     for (const c of x.children) walk(c);
   };
@@ -148,4 +154,11 @@ export function textOf(n: DomNode, alt = true): string {
   return normalize(parts.join(""));
 }
 
-export const normalize = (s: string) => s.replace(/\s+/g, " ").trim();
+/** Hidden by an attribute or an inline style of its own (stylesheets aren't looked at). */
+export function hiddenItself(n: DomNode): boolean {
+  if (n.attrs.has("hidden") || n.attrs.get("aria-hidden") === "true") return true;
+  return /(^|;)\s*(display\s*:\s*none|visibility\s*:\s*hidden)/i.test(n.attrs.get("style") ?? "");
+}
+
+/** Whitespace collapsed, as Playwright compares text (zero-width spaces and soft hyphens left out). */
+export const normalize = (s: string) => s.replace(/[\u200b\u00ad]/g, "").replace(/\s+/g, " ").trim();

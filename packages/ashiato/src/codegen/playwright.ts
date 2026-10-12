@@ -17,11 +17,13 @@ const MAX_ROWS = 20;
 const NOW_MS = 36 * 3600_000;
 /** An action's trigger is looked for this long around the moment the action started. */
 const TRIGGER_BEFORE_MS = 100;
-const TRIGGER_AFTER_MS = 1500;
+const TRIGGER_AFTER_MS = 300;
 /** Requests with no user action, this soon after a page load, were made by the page load. */
 const PAGE_LOAD_MS = 5000;
 
 const q = (s: string) => JSON.stringify(s);
+/** For a comment: on one line. */
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u;
 const key = (s: string) => (IDENTIFIER.test(s) ? s : q(s));
 
@@ -34,6 +36,9 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
   const values = new Values(session);
   const firstPage = interactions.find((i) => i.kind === "goto");
   const origin = firstPage?.value ? originOf(firstPage.value) : undefined;
+  /** The test's page: the first tab. Actions in others (a popup) are left as TODOs. */
+  const tab = (firstPage ?? interactions[0])?.tab;
+  const lines_ = (i: Interaction) => actionLines(i, origin, tab);
   const lines: string[] = [];
   const emit = (line = "") => lines.push(line ? `  ${line}` : "");
 
@@ -46,11 +51,11 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
     return out;
   };
   const write = (list: Interaction[]) => {
-    for (const i of list) for (const l of actionLines(i, origin)) emit(l);
+    for (const i of list) for (const l of lines_(i)) emit(l);
   };
 
   for (const step of session.steps) {
-    const title = `#${step.id} ${step.label}${requestsOf(step)}`;
+    const title = oneLine(`#${step.id} ${step.label}${requestsOf(step)}`);
     if (step.source === "sync") {
       emit();
       emit(`// ${title}: changed while nothing was being done in the app, so not checked here`);
@@ -61,13 +66,17 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
     let todo: string | undefined;
     if (action) {
       const started = Date.parse(action.lastAt ?? action.startedAt);
-      const k = findTrigger(interactions, cursor, started, action.type, action.tab);
+      let k = findTrigger(interactions, cursor, started, action.type, action.tab);
+      // a field that saves on change: typed in earlier, then left
+      const typed = k < 0 && action.type === "change" ? lastFill(interactions, cursor, started, action.tab) : -1;
+      if (typed >= 0) k = typed;
       if (k >= 0) {
         write(before(0, k));
-        body = [interactions[cursor++]!];
+        const i = interactions[cursor++]!;
+        body = [typed >= 0 ? { ...i, blur: true } : i];
       } else {
         write(before(started));
-        todo = `${action.type}${action.target ? ` ${action.target}` : ""} (not found in the screen replay)`;
+        todo = oneLine(`${action.type}${action.target ? ` ${action.target}` : ""} (not found in the screen replay)`);
       }
     } else if (step.action) {
       // requests with no user action: made by a page load just before, or by the page on its own (a timer)
@@ -76,11 +85,11 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
       const load = pending.at(-1);
       if (load?.kind === "goto" && !load.followed && started - load.t < PAGE_LOAD_MS) body = [pending.pop()!];
       write(pending);
-      if (!body.length) todo = `nothing: the page sent ${step.label} by itself`;
+      if (!body.length) todo = oneLine(`nothing: the page sent ${step.label} by itself`);
     } else {
       // a checkpoint taken by hand: what was done since the previous step
       body = before(Date.parse(step.at));
-      if (!body.length) todo = `what was done before the checkpoint "${step.label}"`;
+      if (!body.length) todo = oneLine(`what was done before the checkpoint "${step.label}"`);
     }
     if (!body.length && step.diff.tables.length === 0 && !step.action) {
       emit();
@@ -99,10 +108,11 @@ export function playwrightTest(session: Session, options: PlaywrightOptions = {}
       skippedSaid.add(said);
     }
     if (step.action?.requests.some((r) => r.kind !== "http")) emit("// sent to the desktop app (WebView2): run the test against the app hosting this page");
-    for (const i of body) for (const d of i.dialogs ?? []) emit(dialogLine(d));
+    for (const i of body) if (i.tab === tab) for (const l of dialogLines(i.dialogs ?? [])) emit(l);
     const expected = expectation(step, values, session.tables);
-    const run = body.flatMap((i) => actionLines({ ...i, dialogs: undefined }, origin));
-    if (run.length === 1 && !run[0]!.startsWith("//") && !todo) {
+    const run = body.flatMap((i) => lines_({ ...i, dialogs: undefined }));
+    // one call, with no comment after it
+    if (run.length === 1 && run[0]!.startsWith("await ") && run[0]!.endsWith(";") && !todo) {
       emit(`await expectDbChanges(() => ${run[0]!.replace(/^await /, "").replace(/;$/, "")}, ${expected});`);
     } else {
       emit("await expectDbChanges(async () => {");
@@ -142,7 +152,8 @@ function findTrigger(list: Interaction[], from: number, started: number, type: s
   const fits = (i: Interaction) => {
     switch (type) {
       case "click":
-        return i.kind === "click" || i.kind === "dblclick";
+        // a click on a check box or radio button is taken as checking it
+        return i.kind === "click" || i.kind === "dblclick" || i.kind === "check" || i.kind === "uncheck";
       case "enter":
         return i.kind === "press";
       case "submit":
@@ -164,18 +175,30 @@ function findTrigger(list: Interaction[], from: number, started: number, type: s
   return best;
 }
 
-/** The lines of code that do one interaction. */
-function actionLines(i: Interaction, origin: string | undefined): string[] {
-  const lines = (i.dialogs ?? []).map(dialogLine);
+/** The last fill in the tab from `from` up to `started`. */
+function lastFill(list: Interaction[], from: number, started: number, tab: string | undefined): number {
+  let found = -1;
+  for (let k = from; k < list.length && list[k]!.t <= started; k++) if (list[k]!.kind === "fill" && (!tab || list[k]!.tab === tab)) found = k;
+  return found;
+}
+
+/** The lines of code that do one interaction, on the test's page (in tab `tab`). */
+function actionLines(i: Interaction, origin: string | undefined, tab: string | undefined): string[] {
+  if (tab !== undefined && i.tab !== tab) {
+    // another tab or window (a popup): the test has one page
+    if (i.kind === "goto") return [`// TODO: another tab or window went to ${oneLine(i.value ?? "")}: get it with page.context().waitForEvent("page")`];
+    return [`// TODO: in another tab or window: ${i.kind}${i.value !== undefined && !i.masked ? ` ${q(i.value)}` : ""} on ${oneLine(i.locator?.label ?? "an element")}`];
+  }
+  const lines = dialogLines(i.dialogs ?? []);
   if (i.kind === "goto") {
     const url = i.value ?? "";
     const target = origin && originOf(url) === origin ? url.slice(origin.length) || "/" : url;
-    lines.push(i.followed ? `// the page went to ${target}` : `await page.goto(${q(target)});`);
+    lines.push(i.followed ? `// the page went to ${oneLine(target)}` : `await page.goto(${q(target)});`);
     return lines;
   }
-  const where = i.locator?.label ?? "an element";
+  const where = oneLine(i.locator?.label ?? "an element");
   if (i.unsupported || !i.locator) {
-    lines.push(`// TODO: ${i.kind}${i.value !== undefined ? ` ${q(i.value)}` : ""} on ${where}: ${i.unsupported ?? "not found"}`);
+    lines.push(`// TODO: ${i.kind}${i.value !== undefined && !i.masked ? ` ${q(i.value)}` : ""} on ${where}: ${i.unsupported ?? "not found"}`);
     return lines;
   }
   const el = `page.${i.locator.code}`;
@@ -188,9 +211,11 @@ function actionLines(i: Interaction, origin: string | undefined): string[] {
       break;
     case "fill":
       lines.push(i.masked ? `await ${el}.fill(""); // TODO: the value typed here was masked when recorded` : `await ${el}.fill(${q(i.value ?? "")});`);
+      // Playwright's fill() fires no change event: leaving the field does
+      if (i.blur) lines.push(`await ${el}.blur();`);
       break;
     case "select":
-      lines.push(`await ${el}.selectOption(${q(i.value ?? "")});`);
+      lines.push(i.masked ? `// TODO: select an option in ${where}: the option picked was masked when recorded` : `await ${el}.selectOption(${q(i.value ?? "")});`);
       break;
     case "check":
     case "uncheck":
@@ -203,15 +228,27 @@ function actionLines(i: Interaction, origin: string | undefined): string[] {
   return lines;
 }
 
-/** Answers a dialog the next action opens, as the user did (unanswered, Playwright dismisses it). */
-function dialogLine(d: Dialog): string {
-  if (d.type === "alert") return `page.once("dialog", (dialog) => dialog.accept()); // alert: ${short(d.message)}`;
-  if (d.answer === false || d.answer === null) return `page.once("dialog", (dialog) => dialog.dismiss()); // ${d.type}: ${short(d.message)}`;
+/**
+ * Answers the dialogs the next action opens, in order, as the user did (unanswered, Playwright
+ * dismisses one). Each answer waits for its dialog: the next one opens only after it.
+ */
+function dialogLines(dialogs: Dialog[]): string[] {
+  const [d, ...rest] = dialogs;
+  if (!d) return [];
+  const { code, note } = answerOf(d);
+  if (!rest.length) return [`page.once("dialog", (dialog) => ${code}); // ${note}`];
+  return [`page.once("dialog", (dialog) => {`, `  // ${note}`, ...dialogLines(rest).map((l) => `  ${l}`), `  return ${code};`, "});"];
+}
+
+function answerOf(d: Dialog): { code: string; note: string } {
+  const note = `${d.type}: ${short(d.message)}`;
+  if (d.type === "alert") return { code: "dialog.accept()", note };
+  if (d.answer === false || d.answer === null) return { code: "dialog.dismiss()", note };
   if (d.type === "prompt" && typeof d.answer === "string") {
-    if (/^\*+$/.test(d.answer)) return `page.once("dialog", (dialog) => dialog.accept("")); // TODO: the answer was masked when recorded. ${d.type}: ${short(d.message)}`;
-    return `page.once("dialog", (dialog) => dialog.accept(${q(d.answer)})); // ${d.type}: ${short(d.message)}`;
+    if (/^\*+$/.test(d.answer)) return { code: 'dialog.accept("")', note: `TODO: the answer was masked when recorded. ${note}` };
+    return { code: `dialog.accept(${q(d.answer)})`, note };
   }
-  return `page.once("dialog", (dialog) => dialog.accept()); // ${d.type}: ${short(d.message)}`;
+  return { code: "dialog.accept()", note };
 }
 
 const short = (s: string) => {

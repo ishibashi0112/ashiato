@@ -1,7 +1,7 @@
 import { Window } from "happy-dom";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT } from "../src/client/events.js";
+import { CHANGE_EVENT, DIALOG_EVENT, KEY_EVENT, RESNAPSHOT_EVENT } from "../src/client/events.js";
 import { Dom } from "../src/codegen/dom.js";
 import { interactionsOf, type Interaction, type ReplayEvent } from "../src/codegen/interactions.js";
 import { locatorFor } from "../src/codegen/locator.js";
@@ -10,7 +10,7 @@ import type { Session, Step, TableDiff } from "../src/core/types.js";
 
 /** A page as rrweb serializes it in a full snapshot, with the id of each element. */
 function snapshot(html: string, firstId = 1) {
-  const doc = new new Window().DOMParser().parseFromString(`<!doctype html><html><body>${html}</body></html>`, "text/html");
+  const doc = new new Window().DOMParser().parseFromString(html.startsWith("<html") ? html : `<!doctype html><html><body>${html}</body></html>`, "text/html");
   let next = firstId;
   const ids = new Map<unknown, number>();
   const serialize = (n: Node): unknown => {
@@ -67,7 +67,22 @@ describe("locators", () => {
   });
 
   it("finds same-looking elements by position", () => {
-    expect(code(locate("button:nth-of-type(4)"))).toBe('getByRole("button", { name: "編集", exact: true }).nth(1)');
+    // counting hidden ones too: one hidden by a stylesheet looks visible here
+    expect(code(locate("button:nth-of-type(4)"))).toBe('getByRole("button", { name: "編集", exact: true, includeHidden: true }).nth(1)');
+  });
+
+  it("counts what Playwright counts: not frames, the <head>, aria-hidden icons, but input buttons for text", () => {
+    const page = snapshot(`<iframe></iframe><button id="b"><span aria-hidden="true">✕</span> 閉&#8203;じる</button>`);
+    const dom = new Dom();
+    dom.reset(page.node as never);
+    // a page in the frame with the same button
+    dom.mutate({ adds: [{ parentId: page.id("iframe"), nextId: null, node: snapshot(`<button>閉じる</button>`, page.next() + 10).node as never }] });
+    expect(code(locatorFor(dom, dom.get(page.id("#b"))!))).toBe('getByRole("button", { name: "閉じる", exact: true })');
+
+    const head = domOf(`<html><head><title>受注一覧</title></head><body><span id="c">受注一覧</span><span>保存</span><input type="submit" value="保存"></body></html>`);
+    expect(code(head.locate("#c"))).toBe('getByText("受注一覧", { exact: true })');
+    expect(code(head.locate("span:nth-of-type(2)"))).toBe('getByText("保存", { exact: true }).nth(0)');
+    expect(code(domOf(`<input data-x="a\nb">`).locate("input"))).toBe(String.raw`locator("input[data-x='a\\a b']")`);
   });
 
   it("finds fields by each of their labels, as Playwright does", () => {
@@ -224,9 +239,45 @@ describe("what the user did", () => {
     ]);
   });
 
-  it("makes one double click of click, click, dblclick", () => {
-    const r = recording(form).click(100, "#save").click(150, "#save").click(150, "#save", 4);
+  it("makes one double click of click, click, dblclick, at the second click", () => {
+    const r = recording(form).click(100, "#save").click(300, "#save").click(300, "#save", 4);
     expect(brief(r.interactions()).slice(1)).toEqual([["dblclick", 'getByRole("button", { name: "保存", exact: true })']]);
+    expect(r.interactions()[1]!.t).toBe(T0 + 300);
+  });
+
+  it("leaves out the click Enter makes on the form's button", () => {
+    const r = recording(form).input(100, "#name", "山田");
+    r.custom(200, KEY_EVENT, { key: "Enter", id: r.id("#name"), value: "山田" });
+    r.events.push({ type: 3, timestamp: T0 + 202, data: { source: 2, type: 2, id: r.id("#save"), x: 0, y: 0 } });
+    // a real click later
+    r.events.push({ type: 3, timestamp: T0 + 900, data: { source: 2, type: 2, id: r.id("#save"), x: 12, y: 8 } });
+    expect(brief(r.interactions()).slice(1).map((i) => i[0])).toEqual(["fill", "press", "click"]);
+  });
+
+  it("keeps masked what rrweb masked: a password shown as text, options under maskAllInputs", () => {
+    const r = recording(`<input id="pw" type="text" data-rr-is-password="true" placeholder="パスワード"><select id="s"><option>A</option></select>`);
+    r.input(100, "#pw", "******");
+    r.custom(200, KEY_EVENT, { key: "Enter", id: r.id("#pw"), value: "******" });
+    r.input(300, "#s", "*");
+    const list = r.interactions().slice(1);
+    expect(list.map((i) => [i.kind, i.value, i.masked])).toEqual([
+      ["fill", "", true],
+      ["press", "Enter", undefined],
+      ["select", "", true],
+    ]);
+    const checked = sessionOf([step(1, 1000, { label: "done", source: "manual", diff: diffOf({ table: stock, key: ["item"], inserted: [{ item: 1 }] }) })]);
+    expect(playwrightTest(checked, { interactions: r.interactions() })).toContain("// TODO: select an option in combobox: the option picked was masked when recorded");
+  });
+
+  it("takes a snapshot of the same page taken again for no page load, even at another URL", () => {
+    const r = recording(form);
+    // a single-page app moved on, then rrweb took a snapshot again
+    r.custom(5000, RESNAPSHOT_EVENT, {}).load(5000, "http://127.0.0.1:5173/orders/7", form);
+    r.load(9000, "http://127.0.0.1:5173/done", form);
+    expect(brief(r.interactions())).toEqual([
+      ["goto", "http://127.0.0.1:5173/orders"],
+      ["goto", "http://127.0.0.1:5173/done"],
+    ]);
   });
 
   it("tells page loads the user asked for from those that followed an action", () => {
@@ -376,6 +427,65 @@ describe("generated Playwright tests", () => {
     expect(code).toContain("No screen replay was recorded");
     expect(code).toContain("// TODO: click button \"保存\" (not found in the screen replay)");
     expect(code).not.toContain("test.use({\n  baseURL");
+  });
+
+  const valid = (generated: string) => ts.transpileModule(generated, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.ESNext } }).diagnostics;
+  const change = (ms: number, target: string) => ({ type: "change", target, tab: "tab1", startedAt: iso(ms), requests: [{ kind: "http" as const, method: "POST", url: "/api/x" }] });
+  const updated = diffOf({ table: stock, key: ["item"], updated: [{ key: { item: 3 }, before: { item: 3, qty: 1 }, after: { item: 3, qty: 2 }, changed: ["qty"] }] });
+
+  it("finds each step's own trigger: a check box clicked, a field left after typing", () => {
+    const page = recording(`<input type="checkbox" id="vip"><label for="vip">VIP</label><input id="qty" placeholder="数量"><button id="save">保存</button>`);
+    page.click(1000, "#vip").input(1000, "#vip", "on", { isChecked: true }).click(2000, "#save");
+    page.input(3000, "#qty", "5");
+    const code = playwrightTest(
+      sessionOf([
+        step(1, 1000, { label: 'click checkbox "VIP"', action: click(1000, 'input "VIP"'), diff: updated }),
+        step(2, 2000, { label: 'click button "保存"', action: click(2000, 'button "保存"'), diff: updated }),
+        // change fires when the field is left, later than the typing
+        step(3, 4500, { label: 'change input "数量"', action: change(4500, 'input "数量"'), diff: updated }),
+      ]),
+      { interactions: page.interactions() },
+    );
+    expect(code).toContain('// #1 click checkbox "VIP"\n  await expectDbChanges(() => page.getByRole("checkbox", { name: "VIP", exact: true }).check(), {');
+    expect(code).toContain('// #2 click button "保存"\n  await expectDbChanges(() => page.getByRole("button", { name: "保存", exact: true }).click(), {');
+    expect(code).toContain(`  // #3 change input "数量"
+  await expectDbChanges(async () => {
+    await page.getByPlaceholder("数量", { exact: true }).fill("5");
+    await page.getByPlaceholder("数量", { exact: true }).blur();
+  }, {`);
+  });
+
+  it("answers several dialogs of one action in order, and writes valid code for masked values and long labels", () => {
+    const page = recording(`<input id="pw" type="password" placeholder="パス"><button id="save">保存</button>`);
+    page.input(500, "#pw", "****").click(1000, "#save");
+    page.custom(1100, DIALOG_EVENT, { type: "confirm", message: "保存しますか？", answer: true }).custom(1300, DIALOG_EVENT, { type: "alert", message: "保存しました" });
+    const code = playwrightTest(
+      sessionOf([
+        step(1, 500, { label: 'change input "パス"', action: change(500, 'input "パス"'), diff: updated }),
+        step(2, 1000, { label: 'click button "保存"', action: click(1000, 'button "保存"'), diff: updated }),
+        step(3, 2000, { label: "ran\nthe batch", source: "manual", diff: updated }),
+      ]),
+      { interactions: page.interactions() },
+    );
+    expect(code).toContain(`  page.once("dialog", (dialog) => {
+    // confirm: 保存しますか？
+    page.once("dialog", (dialog) => dialog.accept()); // alert: 保存しました
+    return dialog.accept();
+  });
+  await expectDbChanges(() => page.getByRole("button", { name: "保存", exact: true }).click(), {`);
+    expect(code).toContain('await page.getByPlaceholder("パス", { exact: true }).fill(""); // TODO: the value typed here was masked when recorded');
+    expect(code).toContain('// #3 ran the batch\n');
+    expect(valid(code)).toEqual([]);
+  });
+
+  it("leaves what was done in another tab as TODOs", () => {
+    const main = recording(form).click(1000, "#save");
+    const popup = recording(form, "http://127.0.0.1:5173/detail").click(2000, "#del");
+    const list = interactionsOf(new Map([["tab1", main.events], ["tab2", popup.events]]));
+    const code = playwrightTest(sessionOf([step(1, 2000, { label: 'click button "削除"', action: { ...click(2000, 'button "削除"'), tab: "tab2" }, diff: updated })]), { interactions: list });
+    expect(code).toContain('// TODO: another tab or window went to http://127.0.0.1:5173/detail: get it with page.context().waitForEvent("page")');
+    expect(code).toContain('    // TODO: in another tab or window: click on button "削除"');
+    expect(code).not.toContain('page.goto("/detail")');
   });
 
   it("wraps the page load that sent requests by itself, and quotes names that aren't identifiers", () => {
