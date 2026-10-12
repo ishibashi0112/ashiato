@@ -14,7 +14,11 @@ export type ValueMatcher = JsonValue | bigint | Date | RegExp | ((value: JsonVal
  * `expect.any(Number)`, `expect.stringMatching(/x/)`... Playwright types them as `Record<string, any>`;
  * whether they have `asymmetricMatch` is checked when the expectation is.
  */
-export type AsymmetricMatcher = { asymmetricMatch(actual: unknown): boolean } | Record<string, any>;
+export type AsymmetricMatcher = Asymmetric | Record<string, any>;
+
+interface Asymmetric {
+  asymmetricMatch(actual: unknown): boolean;
+}
 
 /** Some of a row's columns and what their values must be. Other columns (and `undefined` ones) can hold anything. */
 export type RowPattern = Record<string, ValueMatcher | undefined>;
@@ -334,8 +338,8 @@ function timeOf(text: string): number {
   return Date.parse(`${date}T${time}${z}`);
 }
 
-function isAsymmetric(m: unknown): m is AsymmetricMatcher {
-  return typeof m === "object" && m !== null && typeof (m as AsymmetricMatcher).asymmetricMatch === "function";
+function isAsymmetric(m: unknown): m is Asymmetric {
+  return typeof m === "object" && m !== null && typeof (m as Asymmetric).asymmetricMatch === "function";
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -361,7 +365,7 @@ function describeMatcher(m: ValueMatcher): string {
   if (typeof m === "function") return `a value ${m.name ? `${m.name}() accepts` : "the function accepts"}`;
   if (m instanceof Date) return m.toISOString();
   if (typeof m === "bigint") return `${m}n`;
-  return describeValue(m);
+  return describeValue(m as JsonValue);
 }
 
 const describeColumns = (row: Record<string, unknown>, value: (v: never) => string) =>

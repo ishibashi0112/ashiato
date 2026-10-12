@@ -12,7 +12,7 @@ import { generateTest } from "../codegen/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
 import { MediaStore } from "../core/media.js";
-import { loadSession, saveSession } from "../core/store.js";
+import { loadSession, outputFile, saveSession } from "../core/store.js";
 import type { TableRef } from "../core/types.js";
 import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
 import type { Lang } from "../export/text.js";
@@ -161,8 +161,7 @@ export async function main(argv: string[]): Promise<void> {
       log: (m) => console.log(m),
     });
     // --out evidence/login.xlsx, --out evidence/login (for several formats) or --out evidence/ (a folder)
-    let out = values.out ? resolve(values.out) : path;
-    if (values.out && (/[/\\]$/.test(values.out) || statSync(out, { throwIfNoEntry: false })?.isDirectory())) out = join(out, basename(path));
+    const out = outputFile(path, extname(path), values.out);
     const ext = extname(out);
     const base = EXPORT_FORMATS.includes(ext.slice(1).toLowerCase() as ExportFormat) || ext.toLowerCase() === ".json" ? out.slice(0, -ext.length) : out;
     for (const [format, data] of Object.entries(files)) {
@@ -183,7 +182,7 @@ export async function main(argv: string[]): Promise<void> {
     const media = new MediaStore(path, session, undefined, true);
     const code = await generateTest(session, { media, sessionFile: basename(path), name: values.name });
     if (values.out === "-") return void process.stdout.write(code);
-    const out = values.out ? resolve(values.out) : path.replace(/(\.json)?$/i, ".spec.ts");
+    const out = outputFile(path, ".spec.ts", values.out);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, code);
     console.log(`Wrote ${out}`);
@@ -203,9 +202,10 @@ export async function main(argv: string[]): Promise<void> {
       return void console.log(values.json ? JSON.stringify(shown.values ? step : stepShape(step), null, 2) : stepText(step, shown));
     }
     const since = Number(values.since ?? 0);
+    if (!Number.isInteger(since)) throw new Error(`--since takes a step id (a number), not "${values.since}"`);
     const steps = (await source.session()).steps.filter((s) => s.id > since);
     if (values.json) return void console.log(JSON.stringify(shown.values ? steps : steps.map(stepShape), null, 2));
-    return void console.log(steps.map((s) => (values.full ? `${stepText(s, shown)}\n` : stepLine(s))).join("\n") || "No steps.");
+    return void console.log(steps.map((s) => (values.full ? `${stepText(s, shown)}\n` : stepLine(s, shown))).join("\n") || "No steps.");
   }
 
   if (command === "mcp") {
@@ -226,6 +226,8 @@ export async function main(argv: string[]): Promise<void> {
     });
     const close = async () => {
       await agent.close();
+      // stdout to a pipe is written asynchronously on macOS: let the last answers out first
+      await new Promise<void>((r) => process.stdout.write("", () => r()));
       process.exit(0);
     };
     process.on("SIGINT", () => void close());

@@ -1,5 +1,5 @@
 import type { Server } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DbAdapter } from "../adapters/types.js";
@@ -50,18 +50,24 @@ export async function startRecording(db: DbAdapter, options: RecordingOptions = 
   const media = new MediaStore(file, session, () => saveSession(file, session));
   let server: Server | undefined;
   if (options.port !== false) {
-    server = await listen(options.port ?? 4100, {
-      uiDir: uiDir(),
-      getSession: () => session,
-      checkpoint: (label, source, o) => recorder.checkpoint(label, source, o),
-      onStep: (listener) => {
-        recorder.on("step", listener);
-        return () => recorder.off("step", listener);
-      },
-      media,
-      sessionFile: file,
-      browser: options.browser,
-    });
+    try {
+      server = await listen(options.port ?? 4100, {
+        uiDir: uiDir(),
+        getSession: () => session,
+        checkpoint: (label, source, o) => recorder.checkpoint(label, source, o),
+        onStep: (listener) => {
+          recorder.on("step", listener);
+          return () => recorder.off("step", listener);
+        },
+        media,
+        sessionFile: file,
+        browser: options.browser,
+      });
+    } catch (e) {
+      // nothing was recorded: leave no empty session behind (the port may be taken)
+      rmSync(file, { force: true });
+      throw e;
+    }
   }
   const port = server && (server.address() as { port: number }).port;
   return {

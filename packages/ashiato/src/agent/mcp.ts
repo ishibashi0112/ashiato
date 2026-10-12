@@ -39,7 +39,7 @@ export async function serveMcp(tools: McpTool[], info: McpServerInfo, io: { inpu
 
   const handle = async (m: Message): Promise<unknown> => {
     const ok = (result: unknown) => ({ jsonrpc: "2.0", id: m.id, result });
-    const fail = (code: number, message: string) => ({ jsonrpc: "2.0", id: m.id ?? null, error: { code, message } });
+    const fail = (code: number, message: string) => ({ jsonrpc: "2.0", id: (typeof m === "object" && m !== null ? m.id : undefined) ?? null, error: { code, message } });
     if (typeof m !== "object" || m === null || typeof m.method !== "string") {
       // a response to a request of ours (there are none), or not a message at all
       return m && typeof m === "object" && "id" in m && !("method" in m) ? undefined : fail(-32600, "Invalid request");
@@ -90,12 +90,20 @@ export async function serveMcp(tools: McpTool[], info: McpServerInfo, io: { inpu
     }
     // answered as they finish: a ping isn't held up by a long checkpoint
     const p = (async () => {
-      if (Array.isArray(parsed)) {
-        const answers = (await Promise.all(parsed.map((m) => handle(m as Message)))).filter((a) => a !== undefined);
-        if (answers.length) send(answers);
-      } else {
-        const answer = await handle(parsed as Message);
-        if (answer !== undefined) send(answer);
+      try {
+        if (Array.isArray(parsed)) {
+          if (!parsed.length) {
+            send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request: empty batch" } });
+            return;
+          }
+          const answers = (await Promise.all(parsed.map((m) => handle(m as Message)))).filter((a) => a !== undefined);
+          if (answers.length) send(answers);
+        } else {
+          const answer = await handle(parsed as Message);
+          if (answer !== undefined) send(answer);
+        }
+      } catch (e) {
+        send({ jsonrpc: "2.0", id: null, error: { code: -32603, message: `Internal error: ${(e as Error).message}` } });
       }
     })();
     pending.add(p);

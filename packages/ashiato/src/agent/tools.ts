@@ -4,6 +4,7 @@ import { connect } from "../adapters/index.js";
 import type { DbAdapter } from "../adapters/types.js";
 import { startRecording, type Recording, type RecordingOptions } from "../cli/recording.js";
 import { tableId } from "../core/diff.js";
+import { outputFile } from "../core/store.js";
 import { EXPORT_FORMATS, type ExportFormat } from "../export/index.js";
 import type { Lang } from "../export/text.js";
 import type { McpTool } from "./mcp.js";
@@ -52,12 +53,9 @@ export function agentTools(options: AgentOptions): AgentTools {
     if (stopped) return fileSource(stopped);
     throw new Error("Nothing recorded yet: call start_recording first (or pass session_file).");
   };
-  /** Where a file made from the session goes: next to the session file, or in the working directory. */
-  const outFile = async (s: SessionSource, ext: string, out: unknown) => {
-    if (typeof out === "string" && out) return resolve(out);
-    if (s.file) return s.file.replace(/(\.json)?$/i, ext);
-    return resolve(`ashiato-${(await s.session()).startedAt.replace(/[:.]/g, "-")}${ext}`);
-  };
+  /** Where a file made from the session goes: `out` (a file or a folder), or next to the session file (else in the working directory). */
+  const outFile = async (s: SessionSource, ext: string, out: unknown) =>
+    outputFile(s.file ?? resolve(`ashiato-${(await s.session()).startedAt.replace(/[:.]/g, "-")}.json`), ext, typeof out === "string" && out ? out : undefined);
   const valuesNote = values ? "" : " Row values are not shown (the server was started without --share-values): you see tables, columns and counts.";
 
   const tools: McpTool[] = [
@@ -132,7 +130,7 @@ export function agentTools(options: AgentOptions): AgentTools {
         const since = typeof args.since === "number" ? args.since : 0;
         const steps = session.steps.filter((st) => st.id > since);
         const head = `${s.name}: ${session.dialect}, started ${session.startedAt}, ${session.tables.length} tables watched, ${session.steps.length} steps`;
-        return [head, ...steps.map(stepLine)].join("\n");
+        return [head, ...steps.map((st) => stepLine(st, { values }))].join("\n");
       },
     },
     {
@@ -200,7 +198,7 @@ export function agentTools(options: AgentOptions): AgentTools {
         const unknown = formats.filter((f) => !EXPORT_FORMATS.includes(f));
         if (unknown.length) throw new Error(`Unknown format: ${unknown.join(", ")} (use ${EXPORT_FORMATS.join(", ")})`);
         const s = source(args);
-        const base = (await outFile(s, "", args.out)).replace(/\.(xlsx|pdf|html)$/i, "");
+        const base = (await outFile(s, "", args.out)).replace(/\.(xlsx|pdf|html|json)$/i, "");
         const lines: string[] = [];
         for (const format of formats) {
           const { data, notes } = await s.evidence(format, { lang: args.lang === "en" || args.lang === "ja" ? (args.lang as Lang) : undefined, changedOnly: args.changed_only === true, browser: options.browser });

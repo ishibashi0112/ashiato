@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -7,9 +8,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import { serveMcp, type McpTool } from "../src/agent/mcp.js";
+import { stepLine, stepShape, stepText } from "../src/agent/text.js";
 import { agentTools, type AgentTools } from "../src/agent/tools.js";
 import { main } from "../src/cli/main.js";
 import { startRecording, type Recording } from "../src/cli/recording.js";
+import type { Step } from "../src/core/types.js";
 import { createAppDb } from "./helpers.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -84,10 +87,50 @@ describe("MCP over stdio", () => {
     expect((await c.request("ping")).result).toEqual({});
     c.raw("{not json");
     await vi.waitFor(() => expect(c.answers.at(-1)).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }));
+    // not requests: answered, and the server goes on
+    for (const line of ["null", "[null]", "[]", "7"]) {
+      const before = c.answers.length;
+      c.raw(line);
+      await vi.waitFor(() => expect(c.answers.length).toBe(before + 1));
+    }
+    expect(c.answers.slice(-4).flat()).toMatchObject(Array(4).fill({ id: null, error: { code: -32600 } }));
+    expect((await c.request("ping")).result).toEqual({});
     c.end();
     await c.done;
     // no answer to the notification
-    expect(c.answers.filter((a) => a.id === undefined)).toEqual([]);
+    expect(c.answers.filter((a) => !Array.isArray(a) && a.id === undefined)).toEqual([]);
+  });
+});
+
+describe("steps as text without values", () => {
+  const step = (action: Step["action"], label: string): Step => ({ id: 1, label, at: "2026-10-12T00:00:00.000Z", action, diff: { from: "", to: "", tables: [] }, durationMs: 5 });
+  const click = step(
+    {
+      type: "click",
+      target: 'td "yamada.taro@example.com"',
+      page: "/customers?email=yamada.taro@example.com#row-1042",
+      startedAt: "2026-10-12T00:00:00.000Z",
+      requests: [
+        { kind: "http", method: "POST", url: "/api/orders?card=4111", status: 200 },
+        { kind: "rpc", method: "save", error: "The duplicate key value is (1042)." },
+      ],
+    },
+    'click td "yamada.taro@example.com"',
+  );
+  const request = step({ type: "request", page: "/", startedAt: "2026-10-12T00:00:00.000Z", requests: [{ kind: "http", method: "POST", url: "/api/orders?customer=Yamada", status: 200 }] }, "POST /api/orders?customer=Yamada");
+  const button = step({ type: "click", target: 'button "保存"', page: "/orders", startedAt: "2026-10-12T00:00:00.000Z", requests: [] }, 'click button "保存"');
+
+  it("leaves out the clicked text, URL queries and error messages, but keeps buttons' captions", () => {
+    const texts = [stepText(click), stepLine(click, { values: false }), JSON.stringify(stepShape(click)), stepLine(request, { values: false }), JSON.stringify(stepShape(request))];
+    for (const t of texts) expect(t).not.toMatch(/yamada|Yamada|4111|1042|duplicate/);
+    expect(stepText(click)).toContain("#1 click td\n");
+    expect(stepText(click)).toContain("action: click td on /customers?…, at");
+    expect(stepText(click)).toContain("requests: POST /api/orders?… 200; WebView2 call save failed: (message not shown)");
+    expect(stepLine(request, { values: false })).toBe("#1 POST /api/orders?…: no changes");
+    expect(stepLine(button, { values: false })).toBe('#1 click button "保存": no changes');
+    // with values: as recorded
+    expect(stepLine(click)).toContain('click td "yamada.taro@example.com"');
+    expect(stepText(click, { values: true })).toContain("save failed: The duplicate key value is (1042).");
   });
 });
 
@@ -138,6 +181,35 @@ describe("tools for AI agents", () => {
     // still readable after it stopped
     expect(await c.call("get_step", { id: 2 })).toContain("orders (key: id): 0 rows inserted, 0 updated, 1 deleted");
     expect(stopped).toContain(out);
+  });
+
+  it("writes into a folder given as out, and leaves no session behind when the port is taken", async () => {
+    const { out, c } = setup();
+    await c.call("start_recording");
+    await c.call("checkpoint");
+    expect(await c.call("generate_test", { out: join(out, "tests") + "/" })).toMatch(new RegExp(`^Wrote ${join(out, "tests")}/[^/]+\\.spec\\.ts:`));
+    mkdirSync(join(out, "evidence"));
+    expect(await c.call("export_evidence", { formats: ["html"], out: join(out, "evidence") })).toMatch(new RegExp(`^Wrote ${join(out, "evidence")}/[^/]+\\.html$`));
+    expect(await c.call("export_evidence", { formats: ["html"], out: join(out, "x.json") })).toBe(`Wrote ${join(out, "x.html")}`);
+    await c.call("stop_recording");
+
+    const taken = createServer();
+    await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+    cleanups.push(() => new Promise((r) => taken.close(r)));
+    const app = createAppDb();
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-port-"));
+    const busy = agentTools({ db: `sqlite:${app.file}`, out: dir, port: (taken.address() as { port: number }).port });
+    cleanups.push(() => busy.close());
+    const b = client(busy.tools);
+    await expect(b.call("start_recording")).rejects.toThrow("is already in use");
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("doesn't show a file that isn't a session", async () => {
+    const { out, c } = setup();
+    writeFileSync(join(out, ".env"), "DB_PASSWORD=hunter2\n");
+    const error = await c.call("list_steps", { session_file: join(out, ".env") }).catch((e: Error) => e.message);
+    expect(error).toBe(`${join(out, ".env")} is not an ashiato session file`);
   });
 
   it("gives the rows' values when started with --share-values", async () => {
@@ -199,6 +271,7 @@ describe("CLI for scripts", () => {
     await main(["steps", recording.file, "--full", "--no-values"]);
     expect(printed.pop()).not.toContain("20 → 1");
     await expect(main(["steps", "--recorder", "http://127.0.0.1:9"])).rejects.toThrow("No ashiato recorder at http://127.0.0.1:9");
+    await expect(main(["steps", recording.file, "--since", "abc"])).rejects.toThrow('--since takes a step id (a number), not "abc"');
   });
 });
 

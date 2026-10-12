@@ -1,10 +1,21 @@
-import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Session } from "./types.js";
 
 export function sessionPath(dir: string, session: Session): string {
   const stamp = session.startedAt.replace(/[:.]/g, "-");
   return join(dir, `${stamp}.json`);
+}
+
+/**
+ * A file made from a session (a test, evidence): `out` as given, in the folder `out` names (`dir/`,
+ * or a folder that exists), or else next to the session file. In a folder it is named after the session.
+ */
+export function outputFile(sessionFile: string, ext: string, out?: string): string {
+  const name = `${basename(sessionFile).replace(/\.json$/i, "")}${ext}`;
+  if (!out) return join(dirname(sessionFile), name);
+  const target = resolve(out);
+  return /[/\\]$/.test(out) || statSync(target, { throwIfNoEntry: false })?.isDirectory() ? join(target, name) : target;
 }
 
 export function saveSession(file: string, session: Session): void {
@@ -37,7 +48,14 @@ function renameOver(from: string, to: string): void {
 }
 
 export function loadSession(file: string): Session {
-  const s = JSON.parse(readFileSync(file, "utf8")) as Session;
-  if (s.version !== 1 || !Array.isArray(s.steps)) throw new Error(`${file} is not an ashiato session file`);
+  let s: Session | undefined;
+  try {
+    s = JSON.parse(readFileSync(file, "utf8")) as Session;
+  } catch (e) {
+    // not the parser's message: it quotes the file's first characters (a .env's password)
+    if (e instanceof SyntaxError) throw new Error(`${file} is not an ashiato session file`);
+    throw e;
+  }
+  if (s?.version !== 1 || !Array.isArray(s.steps)) throw new Error(`${file} is not an ashiato session file`);
   return s;
 }

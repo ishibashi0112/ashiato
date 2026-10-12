@@ -172,9 +172,11 @@ An AI agent working on your app can record the database while it works and read 
 **MCP server.** Add it to your agent (Claude Code: `claude mcp add ashiato -- npx ashiato mcp --db <url>`):
 
 ```sh
-npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--share-values]
+npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--out <folder>] [--share-values]
 npx ashiato mcp --recorder http://127.0.0.1:4100   # read a running `ashiato record` instead
 ```
+
+Sessions are saved in `--out` (default `.ashiato/sessions`), and relative paths are taken from the folder the agent starts the server in: give a full path if your agent starts it elsewhere.
 
 | Tool | |
 | --- | --- |
@@ -186,7 +188,7 @@ npx ashiato mcp --recorder http://127.0.0.1:4100   # read a running `ashiato rec
 | `generate_test` | Writes a Playwright test from the recording (see above) |
 | `export_evidence` | Writes Excel / PDF / HTML evidence |
 
-**Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values and no URL queries. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
+**Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values, no URL queries, no text of what was clicked other than buttons and fields, and no error messages of the app. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
 
 **CLI.** For scripts, and agents that run commands:
 
@@ -433,9 +435,11 @@ npx ashiato codegen .ashiato/sessions/2026-10-11T04-00-00-000Z.json   # 隣に .
 **MCPサーバー**:エージェントに登録します(Claude Code なら `claude mcp add ashiato -- npx ashiato mcp --db <url>`)。
 
 ```sh
-npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--share-values]
+npx ashiato mcp --db <url> [--tables ...] [--ignore-columns ...] [--port 4100] [--out <フォルダー>] [--share-values]
 npx ashiato mcp --recorder http://127.0.0.1:4100   # 起動中の ashiato record を読む場合
 ```
+
+セッションは `--out`(既定 `.ashiato/sessions`)に保存します。相対パスはエージェントがサーバーを起動したフォルダーから数えるので、別の場所で起動するエージェントではフルパスを指定してください。
 
 | ツール | |
 | --- | --- |
@@ -447,7 +451,7 @@ npx ashiato mcp --recorder http://127.0.0.1:4100   # 起動中の ashiato record
 | `generate_test` | 記録から Playwright のテストを書き出します(上記) |
 | `export_evidence` | Excel / PDF / HTML の証跡を書き出します |
 
-**行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値とURLのクエリは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
+**行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値・URLのクエリ・クリックした要素の文字(ボタンと入力欄以外)・アプリのエラーメッセージは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
 
 **CLI**:スクリプトや、コマンドを実行するエージェント向けです。
 
