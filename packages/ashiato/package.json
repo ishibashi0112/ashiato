@@ -68,6 +68,7 @@
   "scripts": {
     "build": "tsup",
     "prepack": "node -e \"for (const f of ['README.md', 'LICENSE']) require('fs').copyFileSync('../../' + f, f)\"",
+    "prepublishOnly": "pnpm -w run typecheck && pnpm -w run build && pnpm run test",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

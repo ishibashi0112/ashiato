@@ -1,13 +1,15 @@
-import { exactDecimal, normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
-import type { DbAdapter } from "./types.js";
+import type { DbAdapter, QueryResult } from "./types.js";
 
 const q = (id: string) => `\`${id.replace(/`/g, "``")}\``;
 const name = (t: TableRef) => (t.schema ? `${q(t.schema)}.${q(t.name)}` : q(t.name));
 /** Column type of DECIMAL / NUMERIC in result metadata (MYSQL_TYPE_NEWDECIMAL). */
 const DECIMAL = 246;
+
+const text = (v: unknown) => (v === null || v === undefined || v === "" ? undefined : String(v));
 
 /** mysql://user:password@host:3306/database — also works for MariaDB. */
 export async function connectMysql(url: URL): Promise<DbAdapter> {
@@ -109,6 +111,62 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
     },
     forget(t) {
       columns.delete(name(t));
+    },
+    async listViews() {
+      const rows = await query(
+        "SELECT TABLE_SCHEMA AS s, TABLE_NAME AS n FROM information_schema.TABLES WHERE TABLE_TYPE = 'VIEW' AND TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME",
+      );
+      return rows.map((r) => ({ schema: String(r.s), name: String(r.n) }));
+    },
+    async describeTable(t) {
+      const where = [t.schema ?? null, t.name];
+      const cols = await query(
+        `SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE AS nullable, COLUMN_COMMENT AS comment FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
+        where,
+      );
+      // a view's TABLE_COMMENT is the word VIEW
+      const table = await query(
+        `SELECT TABLE_COMMENT AS comment FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ? AND TABLE_TYPE <> 'VIEW'`,
+        where,
+      );
+      return {
+        columns: cols.map((c) => ({ name: String(c.name), type: String(c.type), nullable: c.nullable === "YES", comment: text(c.comment) })),
+        comment: text(table[0]?.comment),
+      };
+    },
+    async runQuery(sql, maxRows) {
+      // A read-only transaction (the server refuses any write) and sql_select_limit, so that only
+      // the rows shown are sent. Both are put back before the connection returns to the pool.
+      let conn = await pool.getConnection();
+      try {
+        await conn.query("START TRANSACTION READ ONLY");
+      } catch (e) {
+        // the server closed the idle connection (wait_timeout, restart): take a new one
+        if (!(e as { fatal?: boolean }).fatal) throw e;
+        conn.destroy();
+        conn = await pool.getConnection();
+        await conn.query("START TRANSACTION READ ONLY");
+      }
+      try {
+        await conn.query(`SET SESSION sql_select_limit = ${maxRows + 1}`);
+        const [rows, fields] = (await conn.query({ sql, rowsAsArray: true })) as unknown as [unknown[][], { name: string; columnType: number }[]?];
+        const decimal = (fields ?? []).map((f) => f.columnType === DECIMAL);
+        return {
+          columns: (fields ?? []).map((f) => f.name),
+          rows: (Array.isArray(rows) ? rows : []).slice(0, maxRows).map((r) => r.map((v, i) => (decimal[i] ? exactDecimal(v) : normalizeValue(v)))),
+          more: Array.isArray(rows) && rows.length > maxRows,
+        } satisfies QueryResult;
+      } finally {
+        try {
+          await conn.query("SET SESSION sql_select_limit = DEFAULT");
+          await conn.query("ROLLBACK");
+          conn.release();
+        } catch {
+          conn.destroy();
+        }
+      }
     },
     async close() {
       await pool.end();

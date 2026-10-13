@@ -1,8 +1,8 @@
-import { exactDecimal, normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
-import type { DbAdapter } from "./types.js";
+import type { DbAdapter, QueryResult } from "./types.js";
 
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
@@ -16,6 +16,8 @@ const name = (t: TableRef) => `${q(t.schema ?? "public")}.${q(t.name)}`;
 const RAW_TYPES = new Set([1082, 1083, 1114, 1184, 1266, 1186, 114, 3802, 1182, 1183, 1115, 1185, 1270, 1187, 199, 3807, 1231]);
 /** bigint and numeric, which pg hands over as text: a number when exact, like the other databases' adapters. */
 const EXACT_TYPES = new Set([20, 1700]);
+
+const text = (v: unknown) => (v === null || v === undefined || v === "" ? undefined : String(v));
 
 export async function connectPostgres(url: URL): Promise<DbAdapter> {
   const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
@@ -101,6 +103,52 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
       return (
         await query(`SELECT ${b} AS "${BUCKET}", ${ALIAS}.xmin::text AS "${SIG}", ${ALIAS}.* FROM ${from(t)} AS ${ALIAS}${where}`)
       ).map(toBucketedRow);
+    },
+    async listViews() {
+      const rows = await query(
+        `SELECT n.nspname AS schema, c.relname AS name
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind IN ('v', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND has_table_privilege(c.oid, 'SELECT')
+          ORDER BY 1, 2`,
+      );
+      return rows.map((r) => ({ schema: String(r.schema), name: String(r.name) }));
+    },
+    async describeTable(t) {
+      // to_regclass gives NULL instead of an error when the table isn't there
+      const rel = name(t);
+      const cols = await query(
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, NOT a.attnotnull AS nullable,
+                col_description(a.attrelid, a.attnum) AS comment
+           FROM pg_attribute a
+          WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
+          ORDER BY a.attnum`,
+        [rel],
+      );
+      const comment = (await query("SELECT obj_description(to_regclass($1), 'pg_class') AS comment", [rel]))[0]?.comment;
+      return {
+        columns: cols.map((c) => ({ name: String(c.name), type: String(c.type), nullable: Boolean(c.nullable), comment: text(c.comment) })),
+        comment: text(comment),
+      };
+    },
+    async runQuery(sql, maxRows) {
+      // A read-only transaction (the server refuses any write), and a cursor so that only the rows
+      // shown are fetched. Nothing is committed.
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN READ ONLY");
+        await client.query(`DECLARE ashiato_query NO SCROLL CURSOR FOR ${sql}`);
+        const res = await client.query({ text: `FETCH FORWARD ${maxRows + 1} FROM ashiato_query`, rowMode: "array" });
+        const rows = res.rows as unknown[][];
+        return {
+          columns: res.fields.map((f) => f.name),
+          rows: rows.slice(0, maxRows).map((r) => r.map(normalizeValue)),
+          more: rows.length > maxRows,
+        } satisfies QueryResult;
+      } finally {
+        await client.query("ROLLBACK").catch(() => undefined);
+        client.release();
+      }
     },
     async close() {
       await pool.end();

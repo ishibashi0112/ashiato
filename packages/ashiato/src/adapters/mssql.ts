@@ -1,11 +1,25 @@
-import { exactDecimal, normalizeRow } from "../core/normalize.js";
-import type { Row, TableRef } from "../core/types.js";
+import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
+import type { JsonValue, Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
-import type { DbAdapter } from "./types.js";
+import type { ColumnInfo, DbAdapter, QueryResult } from "./types.js";
 
 const q = (id: string) => `[${id.replace(/]/g, "]]")}]`;
 const name = (t: TableRef) => (t.schema ? `${q(t.schema)}.${q(t.name)}` : q(t.name));
+
+const text = (v: unknown) => (v === null || v === undefined || v === "" ? undefined : String(v));
+
+/** sys.columns → a type as written in CREATE TABLE: varchar(20), nvarchar(max), decimal(10,2), datetime2(3). */
+function columnInfo(c: Record<string, unknown>): ColumnInfo {
+  const type = String(c.type);
+  const length = Number(c.max_length);
+  let full = type;
+  if (/^(var)?(char|binary)$/.test(type)) full = `${type}(${length === -1 ? "max" : length})`;
+  else if (/^n(var)?char$/.test(type)) full = `${type}(${length === -1 ? "max" : length / 2})`;
+  else if (/^(decimal|numeric)$/.test(type)) full = `${type}(${c.precision},${c.scale})`;
+  else if (/^(datetime2|datetimeoffset|time)$/.test(type)) full = `${type}(${c.scale})`;
+  return { name: String(c.name), type: full, nullable: Boolean(c.is_nullable), comment: text(c.comment) };
+}
 
 export async function connectMssql(url: URL): Promise<DbAdapter> {
   const mssql = await loadDriver<typeof import("mssql")>("mssql", "SQL Server");
@@ -31,6 +45,21 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     const req = pool.request();
     for (const [k, v] of Object.entries(inputs)) req.input(k, mssql.NVarChar, v);
     return (await req.query(sql)).recordset as Record<string, unknown>[];
+  };
+
+  /**
+   * A value of a query's result. Date and time columns come as Dates holding the stored wall-clock
+   * time in UTC (the driver's useUTC): written back as that text, like the other databases give it.
+   * DATETIMEOFFSET is a moment, so it stays ISO text in UTC.
+   */
+  const resultValue = (v: unknown, type: unknown): JsonValue => {
+    if (!(v instanceof Date) || type === mssql.DateTimeOffset) return type === mssql.BigInt ? exactDecimal(v) : normalizeValue(v);
+    const iso = normalizeValue(v);
+    if (typeof iso !== "string") return iso;
+    if (type === mssql.Date) return iso.slice(0, 10);
+    if (type === mssql.Time) return iso.slice(11).replace(/Z$/, "");
+    if (type === mssql.DateTime || type === mssql.DateTime2 || type === mssql.SmallDateTime) return iso.replace("T", " ").replace(/Z$/, "");
+    return iso;
   };
 
   // tedious reads DECIMAL / NUMERIC and MONEY as floating point numbers, which rounds values with
@@ -151,6 +180,74 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
     forget(t) {
       columnLists.delete(name(t));
       rowversions.delete(name(t));
+    },
+    async listViews() {
+      const rows = await query(
+        `SELECT s.name AS TABLE_SCHEMA, o.name AS TABLE_NAME FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
+          WHERE o.type = 'V' AND o.is_ms_shipped = 0 ORDER BY s.name, o.name`,
+      );
+      return rows.map((r) => ({ schema: String(r.TABLE_SCHEMA), name: String(r.TABLE_NAME) }));
+    },
+    async describeTable(t) {
+      // the comments are the MS_Description extended property (what A5:SQL Mk-2 and SSMS show as the description)
+      const cols = await query(
+        `SELECT c.name, TYPE_NAME(c.system_type_id) AS type, c.max_length, c.precision, c.scale, c.is_nullable,
+                CONVERT(nvarchar(4000), ep.value) AS comment
+           FROM sys.columns c
+           LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description'
+          WHERE c.object_id = OBJECT_ID(@t) AND ISNULL(COLUMNPROPERTY(c.object_id, c.name, 'IsHidden'), 0) = 0
+          ORDER BY c.column_id`,
+        { t: name(t) },
+      );
+      const table = await query(
+        `SELECT CONVERT(nvarchar(4000), value) AS comment FROM sys.extended_properties
+          WHERE class = 1 AND major_id = OBJECT_ID(@t) AND minor_id = 0 AND name = N'MS_Description'`,
+        { t: name(t) },
+      );
+      return { columns: cols.map(columnInfo), comment: text(table[0]?.comment) };
+    },
+    async runQuery(sql, maxRows) {
+      // SQL Server has no read-only transaction: the statement was checked to be a SELECT, the user
+      // should only be granted SELECT, and it runs in a transaction that is always rolled back.
+      // Rows are streamed, so a large result is cut off at maxRows.
+      const tx = new mssql.Transaction(pool);
+      await tx.begin();
+      const req = new mssql.Request(tx);
+      req.stream = true;
+      req.arrayRowMode = true;
+      let types: unknown[] = [];
+      let columns: string[] = [];
+      let sets = 0;
+      let more = false;
+      let error: Error | undefined;
+      const rows: JsonValue[][] = [];
+      req.on("recordset", (cols: { name: string; type: unknown }[]) => {
+        // only the first result is shown (SELECT 1 SELECT 2 without a semicolon returns two)
+        if (++sets > 1) return;
+        columns = cols.map((c) => c.name);
+        types = cols.map((c) => c.type);
+      });
+      req.on("row", (row: unknown[]) => {
+        if (sets !== 1 || more) return;
+        if (rows.length === maxRows) {
+          more = true;
+          req.cancel();
+          return;
+        }
+        rows.push(row.map((v, i) => resultValue(v, types[i])));
+      });
+      req.on("error", (e: Error) => {
+        if (!more) error ??= e;
+      });
+      try {
+        // in stream mode the promise settles after the "done" event, errors having gone to "error"
+        await req.query(sql);
+      } finally {
+        // fails when the server already ended the transaction (a severe error): nothing is left to undo
+        await tx.rollback().catch(() => undefined);
+      }
+      if (error) throw error;
+      return { columns, rows, more } satisfies QueryResult;
     },
     async close() {
       await pool.close();
