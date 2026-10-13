@@ -164,7 +164,7 @@ export class DbWatcher {
 }
 
 /** The tables watched now, with those that can't be compared (unreadable now, or at the baseline). */
-function watchedIn(baseline: Snapshot, now: Snapshot): WatchedTable[] {
+export function watchedIn(baseline: Snapshot, now: Snapshot): WatchedTable[] {
   const base = new Map(baseline.tables.map((t) => [tableId(t.table), t]));
   return now.tables.map((t) => {
     const b = base.get(tableId(t.table));

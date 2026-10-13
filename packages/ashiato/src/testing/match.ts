@@ -69,6 +69,22 @@ export interface WatchedTable {
   lost?: boolean;
 }
 
+/**
+ * For `ashiato verify`, not exported from the package: in an update's `set`, the column changed by
+ * this much (after − before, exactly). `by` is a decimal number as text.
+ */
+export class ChangeBy {
+  constructor(readonly by: string) {}
+}
+
+/** For `ashiato verify`, not exported from the package: as a key of an update's `set`, columns the set doesn't list may change too. */
+export const OTHER_COLUMNS: unique symbol = Symbol("other columns may change");
+
+export interface MatchOptions {
+  /** Tables the expectation doesn't list: they must not change (default), or may change in any way. */
+  unlisted?: "unchanged" | "any";
+}
+
 const KINDS = ["inserted", "updated", "deleted"] as const;
 type Kind = (typeof KINDS)[number];
 
@@ -95,7 +111,7 @@ export function checkExpectation(expected: ExpectedChanges): void {
             throw new TypeError(`${where} must be { where: { ...key columns }, set: { ...changed columns } }`);
           }
           checkValues(p.where, `${where}.where`);
-          checkValues(p.set, `${where}.set`);
+          checkValues(p.set, `${where}.set`, true);
         } else if (!isPlainObject(p)) throw new TypeError(`${where} must be an object of column values`);
         else checkValues(p, where);
       });
@@ -106,8 +122,12 @@ export function checkExpectation(expected: ExpectedChanges): void {
 /** Built-in types: `{ name: String }` is a slip for `expect.any(String)`, not a function that accepts values. */
 const TYPES = new Set<unknown>([String, Number, Boolean, BigInt, Date, Object, Array, RegExp, Symbol, Buffer]);
 
-function checkValues(pattern: Record<string, unknown>, where: string): void {
+function checkValues(pattern: Record<string, unknown>, where: string, set = false): void {
   for (const [col, v] of Object.entries(pattern)) {
+    if (v instanceof ChangeBy) {
+      if (!set) throw new TypeError(`${where}.${col}: a change by an amount is only for an update's set`);
+      continue;
+    }
     if (typeof v === "function" && (TYPES.has(v) || /^class\b/.test(Function.prototype.toString.call(v)))) {
       throw new TypeError(`${where}.${col} is the type ${v.name}: for any ${v.name} value, write expect.any(${v.name})`);
     }
@@ -127,7 +147,7 @@ function checkValues(pattern: Record<string, unknown>, where: string): void {
  * Compares the changes found with the expected ones. `watched` are the tables that were watched
  * (the diff only has those that changed).
  */
-export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: WatchedTable[]): MatchResult {
+export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: WatchedTable[], options: MatchOptions = {}): MatchResult {
   const problems: string[] = [];
   const changes: DbChanges = {};
   const byId = new Map(diff.tables.map((t) => [tableId(t.table), t]));
@@ -160,6 +180,7 @@ export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: Wat
     changes[name] = set;
   }
 
+  if (options.unlisted === "any") return problems.length ? { ok: false, problems } : { ok: true, changes };
   for (const t of diff.tables) {
     const id = tableId(t.table);
     if (claimed.has(id)) continue;
@@ -177,16 +198,16 @@ export function matchChanges(diff: Diff, expected: ExpectedChanges, watched: Wat
 
 /**
  * What is wrong with the expectation's tables before anything happens: names that fit several tables,
- * tables listed twice, and tables that can't be compared. (A name that fits no table is not: the
- * action may create it.)
+ * tables listed twice, and tables that can't be compared. A name that fits no table only with
+ * `missing` (otherwise the action may create it).
  */
-export function tableProblems(expected: ExpectedChanges, watched: WatchedTable[]): string[] {
+export function tableProblems(expected: ExpectedChanges, watched: WatchedTable[], missing = false): string[] {
   const problems: string[] = [];
   const claimed = new Map<string, string>();
   for (const name of Object.keys(expected)) {
     const found = resolveTable(name, watched);
     if (typeof found === "string") {
-      if (/ is ambiguous: /.test(found)) problems.push(found);
+      if (missing || / is ambiguous: /.test(found)) problems.push(found);
       continue;
     }
     const id = tableId(found.table);
@@ -330,11 +351,50 @@ function updateMismatch(p: UpdatePattern, u: UpdatedRow): string[] {
   const why = rowMismatch(p.where, u.before, "where ");
   // once the row is the right one, say how the update differs
   if (why.length) return why;
-  const set = Object.keys(p.set).filter((k) => (p.set as Columns)[k] !== undefined);
-  for (const c of u.changed) {
-    if (!set.some((s) => columnOf(u.after, s) === c)) why.push(`${c} also changed: ${describeValue(u.before[c] ?? null)} → ${describeValue(u.after[c] ?? null)}`);
+  const columns = p.set as Columns;
+  const set = Object.keys(columns).filter((k) => columns[k] !== undefined);
+  if (!(OTHER_COLUMNS in columns)) {
+    for (const c of u.changed) {
+      if (!set.some((s) => columnOf(u.after, s) === c)) why.push(`${c} also changed: ${describeValue(u.before[c] ?? null)} → ${describeValue(u.after[c] ?? null)}`);
+    }
   }
-  return [...why, ...rowMismatch(p.set, u.after, "set ")];
+  const values: Record<string, ValueMatcher | undefined> = {};
+  for (const name of set) {
+    const m = columns[name];
+    if (!(m instanceof ChangeBy)) {
+      values[name] = m;
+      continue;
+    }
+    const col = columnOf(u.after, name);
+    if (col === undefined) why.push(`no column set ${name} (columns: ${Object.keys(u.after).join(", ")})`);
+    else {
+      const before = u.before[col] ?? null;
+      const after = u.after[col] ?? null;
+      const by = decimalDifference(after, before);
+      if (by === undefined || by !== exactDecimal(m.by)) why.push(`set ${col}: expected ${describeMatcher(m)}, got ${describeValue(before)} → ${describeValue(after)}`);
+    }
+  }
+  return [...why, ...rowMismatch(values, u.after, "set ")];
+}
+
+/** after − before, exactly (as `exactDecimal` gives it), for numbers and decimals read as text; undefined for other values. */
+function decimalDifference(after: JsonValue, before: JsonValue): JsonValue | undefined {
+  const a = scaled(after);
+  const b = scaled(before);
+  if (!a || !b) return undefined;
+  const scale = Math.max(a.scale, b.scale);
+  const n = a.n * 10n ** BigInt(scale - a.scale) - b.n * 10n ** BigInt(scale - b.scale);
+  const digits = (n < 0n ? -n : n).toString().padStart(scale + 1, "0");
+  const text = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
+  return exactDecimal(`${n < 0n ? "-" : ""}${text}`);
+}
+
+function scaled(v: JsonValue): { n: bigint; scale: number } | undefined {
+  if (typeof v !== "number" && typeof v !== "string") return undefined;
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(String(v).trim());
+  if (!m || (!m[2] && !m[3])) return undefined;
+  const fraction = m[3] ?? "";
+  return { n: BigInt(`${m[1] === "-" ? "-" : ""}${m[2] || "0"}${fraction}`), scale: fraction.length };
 }
 
 /** Whether an actual value fits what was expected. */
@@ -411,7 +471,8 @@ function describeMismatch(m: ValueMatcher, actual: JsonValue, column: string): s
   return `expected ${describeMatcher(m, column)}, got ${describeValue(actual)}`;
 }
 
-function describeMatcher(m: ValueMatcher, column?: string): string {
+function describeMatcher(m: ValueMatcher | ChangeBy, column?: string): string {
+  if (m instanceof ChangeBy) return `a change by ${/^[+-]/.test(m.by) ? m.by : `+${m.by}`}`;
   if (isAsymmetric(m)) {
     const a = m as { toAsymmetricMatcher?: () => string; toString(): string };
     return typeof a.toAsymmetricMatcher === "function" ? a.toAsymmetricMatcher() : String(a);
@@ -431,7 +492,13 @@ const describeColumns = (row: Record<string, unknown>, value: (v: never, column:
     .join(", ")} }`;
 
 const describePattern = (p: RowPattern) => describeColumns(p as Columns, describeMatcher);
-const describeUpdatePattern = (p: UpdatePattern) => `{ where: ${describePattern(p.where)}, set: ${describePattern(p.set)} }`;
+/** An update's set; `…` when other columns may change too. */
+const describeSet = (set: RowPattern) => {
+  const text = describePattern(set);
+  if (!(OTHER_COLUMNS in set)) return text;
+  return text === "{  }" ? "{ … }" : text.replace(/ }$/, ", … }");
+};
+const describeUpdatePattern = (p: UpdatePattern) => `{ where: ${describePattern(p.where)}, set: ${describeSet(p.set)} }`;
 export const describeRow = (r: Row) => describeColumns(r, (v: JsonValue) => describeValue(v));
 
 function keyText(t: { key: string[] }, row: Row): string {

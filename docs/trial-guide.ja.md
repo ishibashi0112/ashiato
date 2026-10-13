@@ -265,6 +265,37 @@ Press Enter for a checkpoint (optionally type a label first). Ctrl+C to stop.
   npx ashiato show .ashiato\sessions\<ファイル名>.json
   ```
 
+### 4-5. AI チャットの手順どおりに操作して照合する(任意)
+
+チャットだけで動作検証をするときの使い方です。チャットが書いた手順ファイル(`checks\<名前>.verify.md`)を 1 手順ずつ表示し、操作のあとの DB の変化を、手順に書かれた期待と照合します。試すときは、次のような手順ファイルを手で作ります(テーブル名・列名・値は試すアプリに合わせます)。
+
+```markdown
+# 受注登録の動作検証
+
+## 1. 受注を登録する
+受注画面で得意先 C001・品目 A001・数量 3 を入れて「登録」を押す
+
+期待する DB の変化:
+- ORDERS: 追加 1 行 (CUSTOMER_CODE=C001)
+- ほかの表: 問わない
+```
+
+```powershell
+npx ashiato verify checks\受注登録.verify.md --tables "Orders,OrderDetails,Stock"
+```
+
+- 手順が表示されたら、アプリで操作してから Enter を押します。画面に出たことをメモしたいときは、入力してから Enter を押します
+- `✓ OK` か `✗ NG` が出ます。NG のときは違いが表示され、`r` でもう一度照合、Enter で次の手順に進みます
+- 最後に結果がクリップボードに入ります。チャットに貼ります
+- `--tables` を付けないと、すべてのテーブルを見張ります。テーブルが多い DB では、起動と照合に時間がかかるので絞ってください
+
+確認すること:
+
+- 期待どおりの操作で OK、わざと違う値を入れると NG になり、違いの表示で原因が分かる
+- 貼った結果を、チャットが読めている(OK / NG の表、違い、変わった行)
+
+> 結果には、変わった行の値が入ります。チャットに貼ってよいかは社内の決まりに従ってください。
+
 ---
 
 ## 5. Vite の画面・WebView2 アプリで自動記録する
@@ -366,6 +397,7 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 | 14 | 長時間の記録 | 30 分以上・数十ステップ記録しても遅くならない。タスク マネージャーで Node.js のメモリが増え続けない |
 | 15 | アプリへの影響 | 記録中もアプリの操作感が変わらない(注 2) |
 | 16 | 記録中に作られたテーブル | アプリが作業用テーブルを作る操作で、そのテーブルが **New** として出る(該当する操作があれば) |
+| 17 | 手順ファイルでの照合(4-5、任意) | 期待どおりなら OK、違えば NG と違いが出る。結果をチャットが読める |
 
 - 注 1:SQL Server の日時は、末尾に `Z` の付いた形(例:`2026-10-11T10:00:00.000Z`)で表示されますが、数字は DB に入っている値そのままです。`datetimeoffset` 型だけは、UTC に直した時刻で表示されます。`date` 型は `2026-10-11T00:00:00.000Z`、`time` 型は `1970-01-01T10:00:00.000Z` のように表示されます。Oracle の `DATE` / `TIMESTAMP` は、DB の値をそのまま文字にしたもの(例:`2026-10-11 10:00:00`)です
 - 注 2:5 章の自動記録では、操作の最初の通信を送る直前に一度チェックポイントを取るため、その分だけ通信が待たされます(最大 5 秒)。遅く感じたら、ステップの所要時間と合わせて報告してください
@@ -394,6 +426,7 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 | `NJS-533`(Oracle。`Native Network Encryption ... only supported in node-oracledb thick mode`) | DB 側でネットワーク暗号化(またはチェックサム)が必須になっていて、Thin モードでは接続できません。URL に `&client=thick` を付けて Thick モードで接続します |
 | `Thick mode needs Oracle Instant Client ...`(Oracle) | Oracle Instant Client が見つかりません。`libDir=` に Instant Client のフォルダーを指定するか、Instant Client を入れてください。PC の Node.js と Instant Client のビット数(64 ビット)が合っているかも確認します |
 | `query` で `Nothing was run: ...` | SELECT だけではない文があるため、1 文も実行していません。クリップボードに入った理由をチャットに貼り、書き直してもらいます |
+| `verify` で `Nothing was checked: ...` | 手順ファイルの書き方が違うか、ないテーブルを書いています。何も照合していません。クリップボードに入った直すべき点をチャットに貼り、書き直してもらいます(`--tables` で絞っている場合は、手順ファイルのテーブルも含めます) |
 | `NJS-518`(Oracle。`Service ... is not registered with the listener`) | サービス名が違います。tnsnames.ora の `SERVICE_NAME` を使います |
 | `Tables not found: ...`(または `--tables` なしで `Watching 0 table(s)`) | `--tables` のテーブル名が違うか、そのテーブルの SELECT 権限がないか、Oracle で `?schema=` を付けていません。`npx ashiato tables` の表示どおりに書き、全体を `"` で囲みます |
 | 記録中にアプリが作ったテーブルが出てこない | 参照専用ユーザーにそのテーブルを読む権限がありません(テーブルごとの `GRANT` では付きません。[1 章](#1-事前に確認しておくこと)の DB を参照)。`--tables` を付けている場合は、その名前のテーブルしか監視しません |

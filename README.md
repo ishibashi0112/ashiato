@@ -202,11 +202,12 @@ npx ashiato tables --db <url> --json
 
 ## For AI chats (no agent)
 
-Where AI agents aren't allowed but a chat is (Microsoft 365 Copilot Chat, for example), you carry the text between the chat and your machine. Two commands make that one paste each way:
+Where AI agents aren't allowed but a chat is (Microsoft 365 Copilot Chat, for example), you carry the text between the chat and your machine. Three commands make that one paste each way:
 
 ```sh
 npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
 npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <file>] [--no-clip]
+npx ashiato verify checks/order-entry.verify.md --db <url> [--tables ...] [--ignore-columns ...] [--out <file>] [--no-clip] [--save-session]
 ```
 
 - **`schema`** writes the tables' and views' columns, types, primary keys and comments as Markdown (`docs/db/schema.md` by default), for the chat to write SQL against. No row values. `--tables` takes names or `*` / `?` patterns: a chat takes about 100,000 characters in one paste, so pick the tables of a large database.
@@ -223,6 +224,32 @@ HAVING o.total <> SUM(l.qty * l.price);
 **Only reading.** `query` runs `SELECT` and `WITH` statements only. If any statement could write (`INSERT`, `UPDATE`, `SELECT ... INTO`, `FOR UPDATE`, `EXEC`, a second statement hidden in a SQL Server batch...), none is run, and what is copied says which statement and why, so that the chat can rewrite it. As second guards, statements run in a read-only transaction (PostgreSQL, MySQL, Oracle), in a transaction that is always rolled back (SQL Server), or on a database opened read-only (SQLite). Connect as a user that may only `SELECT` all the same (see below).
 
 **The results hold your data.** ashiato only puts them on your clipboard; pasting them into a chat sends them to that service. Check that your company allows it for the database you query (a test database, not production). Files are read as UTF-8 or Shift_JIS. Statements end with `;`, or a line with only `GO` or `/`. On SQL Server the driver hands decimals over as floating-point numbers: `CAST` a column with more than 15 significant digits to `varchar` to see all of them.
+
+**`verify`** takes you through a verification the chat wrote: before each step it reads the tables, shows what to do, and waits while you do it in the app (any app: a web page, WinForms, a batch). Press Enter when you're done (type a note first, such as what the screen showed, if you like; `s` skips the step, `q` stops). It then compares what changed in the database with what the step expects and says OK or NG. Writes that come a moment later are waited for (3 seconds), and after NG `r` checks again. At the end the results are copied as Markdown: a table of the steps with OK / NG and your notes, then each step's expected changes, how they differ, and the rows that changed. `--save-session` also saves the changes as a session, for `ashiato export` (Excel evidence) and `ashiato show`.
+
+```markdown
+# Order entry
+
+## 1. Enter an order
+In the order screen, enter customer C001, item A001, quantity 3, and press "Save".
+
+Expected changes:
+- ORDERS: inserted 1 row (CUSTOMER_CODE=C001, STATUS=10)
+- STOCK: updated 1 row (ITEM_CODE=A001) → (QTY-=3, UPD_DATE=*)
+- other tables: no changes
+
+## 2. Cancel it
+Expected changes:
+- ORDERS: updated 1 row (CUSTOMER_CODE=C001) → (STATUS=90, ...)
+- STOCK: updated (ITEM_CODE=A001) → (QTY+=3, ...)
+```
+
+- Each step is a `## ` heading. The text before `Expected changes:` (`期待する DB の変化:`) is what to do; a step without that line is shown and its changes recorded, not checked.
+- One line per table and kind of change: `inserted` / `updated` / `deleted` (`追加` / `更新` / `削除`), the number of rows (`2 rows`; 1 when column values are given), and in parentheses the values the rows have. An update has the row's values before it, then `→` and the columns after it: `COLUMN=value`, `COLUMN+=n` / `COLUMN-=n` (changed by that much), `COLUMN=*` (any value). Every column the update changes must be listed, unless the list ends with `...`; an update without `→` may change any columns. `TABLE: no changes` says a table must not change.
+- Tables not listed must not change (`other tables: no changes`, the default), unless the step says `other tables: any` (a log table that changes at every action). `no changes` alone: nothing changes.
+- Values are compared as a person reads them: `10` is `10.00`, `0001` is not `1`, `1` / `0` are true / false for a bit column, trailing spaces don't count (`CHAR` columns), a date (`2026-10-13`) is any time that day, `NULL` is NULL, and `'...'` quotes a value with commas or parentheses. Columns ignored with `--ignore-columns` never count as changed.
+- If the file can't be read as steps, or names a table that isn't there, nothing is checked and what to correct is copied instead (to paste back into the chat).
+- The results hold the changed rows' values, like `query`'s.
 
 ## Large tables
 
@@ -490,11 +517,12 @@ npx ashiato tables --db <url> --json
 
 ### AIチャット向け(エージェントなし)
 
-AIエージェントは使えないがチャット(Microsoft 365 Copilot Chat など)は使える環境では、チャットと手元のPCの間を人がテキストで運びます。次の2つのコマンドで、行き帰りとも1回の貼り付けで済みます。
+AIエージェントは使えないがチャット(Microsoft 365 Copilot Chat など)は使える環境では、チャットと手元のPCの間を人がテキストで運びます。次の3つのコマンドで、行き帰りとも1回の貼り付けで済みます。
 
 ```sh
 npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
 npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <ファイル>] [--no-clip]
+npx ashiato verify checks/受注登録.verify.md --db <url> [--tables ...] [--ignore-columns ...] [--out <ファイル>] [--no-clip] [--save-session]
 ```
 
 - **`schema`**:テーブルとビューの列・型・主キー・コメントを Markdown に書き出します(既定は `docs/db/schema.md`)。チャットのAIがこれを見て SQL を書きます。行の値は含みません。`--tables` には名前か `*`・`?` のパターンを指定します。チャットに1回で貼れるのは10万文字ほどなので、大きなDBではテーブルを絞ってください。
@@ -511,6 +539,32 @@ HAVING o.total <> SUM(l.qty * l.price);
 **参照だけです。** `query` が実行するのは `SELECT` と `WITH` の文だけです。書き込む可能性のある文(`INSERT`・`UPDATE`・`SELECT ... INTO`・`FOR UPDATE`・`EXEC`・SQL Server のバッチに続けて書いた別の文など)が1つでもあれば1文も実行せず、どの文がなぜだめかをクリップボードに入れます(チャットに貼れば書き直してもらえます)。さらに、読み取り専用トランザクション(PostgreSQL・MySQL・Oracle)、必ずロールバックするトランザクション(SQL Server)、読み取り専用で開いたDB(SQLite)の中で実行します。それでも、接続には SELECT だけを許可したユーザーを使ってください(下記)。
 
 **結果にはデータが入ります。** ashiato はクリップボードに入れるだけですが、チャットに貼るとそのサービスに送られます。対象のDB(本番ではなくテスト用)の値をチャットに貼ってよいか、社内の決まりを確かめてください。ファイルは UTF-8 か Shift_JIS で読みます。文の区切りは `;` か、`GO` または `/` だけの行です。SQL Server のドライバーは decimal を浮動小数点数で返すため、有効数字が15桁を超える列は `varchar` に `CAST` すると全桁を見られます。
+
+**`verify`** は、チャットが書いた動作検証の手順を 1 つずつ案内します。手順ごとに、先にテーブルを読んでから「すること」を表示し、人がアプリ(Web 画面でも WinForms でもバッチでも)で操作するのを待ちます。終わったら Enter を押します(画面に出たことなどのメモを入力してから Enter でも構いません。`s` で手順を飛ばし、`q` で終わります)。その間のDBの変化を手順の期待と照合し、OK か NG を出します。少し遅れて書き込まれる分は 3 秒まで待ち、NG のあとは `r` でもう一度照合できます。最後に、手順ごとの OK / NG とメモの表、各手順の期待・違い・変わった行を Markdown にしてクリップボードに入れます。`--save-session` を付けると変化をセッションとしても保存し、`ashiato export`(Excel の証跡)と `ashiato show` で使えます。
+
+```markdown
+# 受注登録の動作検証
+
+## 1. 受注を登録する
+受注画面で得意先 C001・品目 A001・数量 3 を入れて「登録」を押す
+
+期待する DB の変化:
+- ORDERS: 追加 1 行 (CUSTOMER_CODE=C001, STATUS=10)
+- STOCK: 更新 1 行 (ITEM_CODE=A001) → (QTY-=3, UPD_DATE=*)
+- ほかの表: 変化なし
+
+## 2. 取り消す
+期待する DB の変化:
+- ORDERS: 更新 1 行 (CUSTOMER_CODE=C001) → (STATUS=90, ...)
+- STOCK: 更新 (ITEM_CODE=A001) → (QTY+=3, ...)
+```
+
+- 手順は `## ` の見出しです。`期待する DB の変化:`(`Expected changes:`)より前が「すること」です。この行のない手順は、表示して変化を記録するだけで照合しません。
+- 1 行に、表と変化の種類を 1 つ書きます。`追加` / `更新` / `削除`、行数(`2 行`。列の値を書くときは省略すると 1 行)、括弧の中にその行の値。更新は、更新前の値で行を特定し、`→` の後に更新後の列を書きます。`列=値`、`列+=数` / `列-=数`(その分だけ増える・減る)、`列=*`(値は問わない)。更新で変わる列はすべて書きます。最後に `...` を付けると、ほかの列も変わってよいことになります。`→` のない更新は、どの列が変わっても構いません。`表名: 変化なし` は、その表が変わらないことです。
+- 書いていない表は変わってはいけません(`ほかの表: 変化なし`。既定)。操作のたびに変わるログの表などがあるときは `ほかの表: 問わない` と書きます。`変化なし` だけの行は、何も変わらないことです。
+- 値は人が読むように比べます。`10` と `10.00` は同じ、`0001` と `1` は別、ビット列の `1` / `0` は真 / 偽、末尾の空白は無視(`CHAR` 列)、日付(`2026-10-13`)はその日のどの時刻でも一致、`NULL` は NULL、カンマや括弧を含む値は `'...'` で囲みます。`--ignore-columns` で外した列は、変わっても数えません。
+- ファイルが手順として読めないときや、ない表を書いているときは、何も照合せず、直すべきことをクリップボードに入れます(チャットに貼り返します)。
+- 結果には、`query` と同じく、変わった行の値が入ります。
 
 ### 大きなテーブル
 
