@@ -98,40 +98,30 @@
 
 ## 2. ashiato を用意する
 
-ashiato はまだ npm に公開していないので、パッケージファイル `ashiato-0.1.0.tgz` からインストールします。
+### 2-1. 作業フォルダーにインストールする
 
-### 2-1. パッケージファイルを手に入れる
-
-次のどちらかで `ashiato-0.1.0.tgz` を用意します。
-
-- **持ち込む**:社外で作った(または共有された)`ashiato-0.1.0.tgz` を、社内のルールに沿ってこの PC にコピーします
-- **社内でビルドする**:社内から GitHub に接続できる場合は、ソースから作れます(pnpm を入れていなくても、`npx` 経由で動きます)
-
-  ```powershell
-  git clone https://github.com/ishibashi0112/ashiato.git
-  cd ashiato
-  npx -y pnpm@10.28.0 install
-  npx -y pnpm@10.28.0 build
-  git rev-parse --short HEAD   # 報告用に、ビルドしたコミットを控えておく
-  cd packages\ashiato
-  npm pack                     # このフォルダーに ashiato-0.1.0.tgz ができます
-  ```
-
-### 2-2. 作業フォルダーにインストールする
-
-アプリとは別の作業フォルダーを作り、ashiato と DB のドライバーを入れます。アプリ本体には手を入れません(5 章で自動記録を試すときだけ、アプリにも入れます)。
+アプリとは別の作業フォルダーを作り、ashiato と DB のドライバーを npm から入れます。アプリ本体には手を入れません(5 章で自動記録を試すときだけ、アプリにも入れます)。
 
 ```powershell
 mkdir C:\ashiato-trial
 cd C:\ashiato-trial
 npm init -y
-npm install -D C:\path\to\ashiato-0.1.0.tgz mssql oracledb   # 使う DB のドライバーだけでも構いません
+npm install -D ashiato mssql oracledb   # 使う DB のドライバーだけでも構いません
+npx ashiato --version                   # 報告用に、版数を控えておく
 npx ashiato --help
 ```
 
 `ashiato — record what your app changes in the database` から始まる説明(`Usage:` を含む)が表示されれば準備完了です。
 
 > PowerShell で「このシステムではスクリプトの実行が無効になっている」と出て `npx` が動かない場合は、`npx` の代わりに `npx.cmd` と入力するか、コマンドプロンプト(cmd)で実行してください。
+
+### 2-2. 社内のレジストリから ashiato を取得できない場合
+
+社内レジストリが承認済みのパッケージしか置かない場合などは、パッケージファイル(`ashiato-<版数>.tgz`)から入れます。
+
+1. 社外の PC で `npm pack ashiato` を実行すると、そのフォルダーに `ashiato-<版数>.tgz` ができます
+2. 社内のルールに沿って、そのファイルをこの PC にコピーします
+3. 2-1 の `npm install` を `npm install -D C:\path\to\ashiato-<版数>.tgz mssql oracledb` に置き換えて実行します
 
 ---
 
@@ -287,7 +277,7 @@ Vite で作った画面なら、ボタンのクリックなど通信を伴う操
 
 ```powershell
 git switch -c try-ashiato                     # 試用用のブランチ
-npm install -D C:\path\to\ashiato-0.1.0.tgz   # yarn / pnpm のアプリは、それぞれの add コマンドで
+npm install -D ashiato                        # yarn / pnpm のアプリは、それぞれの add コマンドで(2-2 の場合は tgz のパス)
 ```
 
 `vite.config.ts`(または `vite.config.js`)にプラグインを追加します。
@@ -300,7 +290,7 @@ export default defineConfig({
 });
 ```
 
-- `package.json` に PC 上のファイルへの参照が入るので、このブランチは push やマージをしないでください
+- 試用用のブランチなので、push やマージはしないでください(2-2 の場合は `package.json` に PC 上のファイルへの参照が入ります)
 - DB のドライバーは、アプリ側には不要です(レコーダーは 2 章の作業フォルダーで動かします)
 
 ### 5-2. 起動する
@@ -430,7 +420,7 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 ```
 ## 試用結果
 - 日付:
-- ashiato のコミット(分かれば):
+- ashiato の版数(`npx ashiato --version`):
 - Node.js のバージョン:
 - DB:(例:SQL Server 2019 / Oracle 19c)
 - アプリの種類と試した範囲:(例:WPF + WebView2 + Vite、5 章まで)
