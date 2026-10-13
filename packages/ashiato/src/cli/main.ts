@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
@@ -9,6 +10,8 @@ import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
 import { schemaMarkdown } from "../chat/schema.js";
+import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport } from "../chat/verify.js";
+import { parseVerifyFile } from "../chat/verifyFile.js";
 import { fileSource, recorderSource } from "../agent/source.js";
 import { stepLine, stepShape, stepText } from "../agent/text.js";
 import { agentTools } from "../agent/tools.js";
@@ -16,8 +19,8 @@ import { generateTest } from "../codegen/index.js";
 import { tableId } from "../core/diff.js";
 import { formatStep } from "../core/format.js";
 import { MediaStore } from "../core/media.js";
-import { evidenceBase, loadSession, outputFile, saveSession } from "../core/store.js";
-import type { TableRef } from "../core/types.js";
+import { evidenceBase, loadSession, outputFile, saveSession, sessionPath } from "../core/store.js";
+import type { Session, TableRef } from "../core/types.js";
 import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
 import { langOf, type Lang } from "../export/text.js";
 import { listen, startRecording, uiDir } from "./recording.js";
@@ -35,6 +38,7 @@ Usage:
   ashiato mcp --db <url> [record options] [--share-values]   (or --recorder <url>)
   ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--out docs/db/schema.md] [--lang ja|en]
   ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
+  ashiato verify <file.verify.md> --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
@@ -85,13 +89,20 @@ For AI chats (no agent: you carry the text between the chat and this machine):
   query                   Runs the statements of .sql files (a folder: its .sql files) read-only and
                           copies the results to the clipboard as Markdown, to paste into the chat.
                           Only SELECT / WITH statements: if any statement could write, none is run.
+  verify                  Shows the steps of a verification the chat wrote, one at a time: you do what a
+                          step says and press Enter, and the changes in the database are compared with
+                          the ones it expects (see the README). The results (OK / NG, what differs, the
+                          rows that changed) are copied to the clipboard as Markdown.
   --tables <list>         schema: tables and views to include; * and ? match any characters
+                          verify: tables to watch, as for record (default: all)
   --no-views              schema: tables only
   --out <file>            schema: where to write it (default docs/db/schema.md; - for the terminal)
-                          query: also write the results to this file (- for the terminal)
+                          query / verify: also write the results to this file (- for the terminal)
   --max-rows <n>          query: rows shown per statement (default 50)
-  --no-clip               query: don't copy to the clipboard (without --out, the results are printed)
-  --lang <ja|en>          schema / query: language of the text around the data (default: the machine's)
+                          verify: tables with more rows than this are not watched (default 100000)
+  --no-clip               query / verify: don't copy to the clipboard (without --out, the results are printed)
+  --save-session          verify: also save the changes as a session in .ashiato/sessions (for export / show)
+  --lang <ja|en>          schema / query / verify: language of the text around the data (default: the machine's)
 
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
@@ -146,6 +157,39 @@ function readSqlFiles(paths: string[]): SqlFile[] {
   });
 }
 
+interface DeliverValues {
+  out?: string;
+  "no-clip"?: boolean;
+}
+
+/** With --out -, stdout carries the results only. */
+const infoFor = (values: DeliverValues) => (m: string) => (values.out === "-" ? console.error(m) : console.log(m));
+
+/** Puts a report for the chat on the clipboard, and in the file --out names (- for stdout). */
+function deliverReport(markdown: string, what: string, values: DeliverValues, shorter: string): void {
+  const info = infoFor(values);
+  if (values.out === "-") process.stdout.write(markdown);
+  else if (values.out) {
+    const out = resolve(values.out);
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, markdown);
+    console.log(`Wrote ${shown(out)}`);
+  }
+  if (values["no-clip"]) {
+    if (!values.out) process.stdout.write(markdown);
+  } else {
+    const clip = writeClipboard(markdown);
+    if (clip.ok) info(`Copied ${what} to the clipboard (${markdown.length.toLocaleString("en-US")} characters): paste it into the chat.`);
+    else if (values.out) console.error(`Could not copy to the clipboard (${clip.message}).`);
+    else {
+      // nowhere else to go: show it here
+      console.error(`Could not copy to the clipboard (${clip.message}). The text to paste:\n`);
+      process.stdout.write(markdown);
+    }
+  }
+  if (markdown.length > PASTE_LIMIT) info(`Note: a chat may cut off text this long (more than about ${PASTE_LIMIT.toLocaleString("en-US")} characters): ${shorter}.`);
+}
+
 async function runQueryCommand(paths: string[], values: { db?: string; out?: string; "max-rows"?: string; "no-clip"?: boolean; lang?: string }, dbUrl?: string) {
   if (!paths.length) throw new Error("Usage: ashiato query <file.sql | folder>... --db <url>");
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
@@ -155,30 +199,8 @@ async function runQueryCommand(paths: string[], values: { db?: string; out?: str
   const maxRows = Number(values["max-rows"] ?? 50);
   if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 10_000) throw new Error("--max-rows takes a number from 1 to 10000");
 
-  // with --out -, stdout carries the results only
-  const info = (m: string) => (values.out === "-" ? console.error(m) : console.log(m));
-  const deliver = (markdown: string, what: string) => {
-    if (values.out === "-") process.stdout.write(markdown);
-    else if (values.out) {
-      const out = resolve(values.out);
-      mkdirSync(dirname(out), { recursive: true });
-      writeFileSync(out, markdown);
-      console.log(`Wrote ${shown(out)}`);
-    }
-    if (values["no-clip"]) {
-      if (!values.out) process.stdout.write(markdown);
-    } else {
-      const clip = writeClipboard(markdown);
-      if (clip.ok) info(`Copied ${what} to the clipboard (${markdown.length.toLocaleString("en-US")} characters): paste it into the chat.`);
-      else if (values.out) console.error(`Could not copy to the clipboard (${clip.message}).`);
-      else {
-        // nowhere else to go: show it here
-        console.error(`Could not copy to the clipboard (${clip.message}). The text to paste:\n`);
-        process.stdout.write(markdown);
-      }
-    }
-    if (markdown.length > PASTE_LIMIT) info(`Note: a chat may cut off text this long (more than about ${PASTE_LIMIT.toLocaleString("en-US")} characters): lower --max-rows or run fewer statements.`);
-  };
+  const info = infoFor(values);
+  const deliver = (markdown: string, what: string) => deliverReport(markdown, what, values, "lower --max-rows or run fewer statements");
 
   const planned = planQueries(readSqlFiles(paths), dialect);
   if (!planned.length) throw new Error("No statements to run");
@@ -205,6 +227,116 @@ async function runQueryCommand(paths: string[], values: { db?: string; out?: str
   } finally {
     await db.close();
   }
+}
+
+interface VerifyValues extends DeliverValues {
+  tables?: string;
+  "ignore-columns"?: string;
+  "max-rows"?: string;
+  "full-read"?: boolean;
+  "save-session"?: boolean;
+  lang?: string;
+}
+
+async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: string) {
+  const [path, ...extra] = paths;
+  if (!path || extra.length) throw new Error("Usage: ashiato verify <file.verify.md> --db <url>");
+  if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
+  if (!dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
+  const lang = langOption(values.lang);
+  const maxRows = values["max-rows"] === undefined ? undefined : Number(values["max-rows"]);
+  if (maxRows !== undefined && (!Number.isInteger(maxRows) || maxRows < 1)) throw new Error("--max-rows takes a number of rows");
+  const fileName = shown(resolve(path));
+  const file = parseVerifyFile(decodeText(readFileSync(resolve(path))), lang);
+  const deliver = (markdown: string, what: string) => deliverReport(markdown, what, values, "split the steps into several files");
+  if (file.problems.length) {
+    // nothing is checked, and what to correct goes back to the chat
+    for (const p of file.problems) console.error(`${fileName}:${p.line}: ${p.message}`);
+    console.error("Nothing was checked: the file needs correcting.");
+    deliver(fileProblemsReport(file, file.problems, { fileName, lang }), "what to correct");
+    process.exitCode = 1;
+    return;
+  }
+
+  const db = await connect(dbUrl);
+  const input = lineReader();
+  // Ctrl+C ends the steps; the results so far are still copied
+  const interrupted = () => input.close();
+  process.once("SIGINT", interrupted);
+  try {
+    const run = await runVerify(db, file, {
+      lang,
+      tables: list(values.tables),
+      ignoreColumns: list(values["ignore-columns"]),
+      maxRows,
+      incremental: !values["full-read"],
+      ask: input.ask,
+      log: (m) => console.log(m),
+    });
+    if (run.problems) {
+      for (const p of run.problems) console.error(p);
+      console.error("Nothing was checked: the file names tables that aren't watched.");
+      deliver(fileProblemsReport(file, run.problems, { fileName, lang }), "what to correct");
+      process.exitCode = 1;
+      return;
+    }
+    const tally = (["ok", "ng", "unchecked", "skipped", "not-run", "error"] as const)
+      .map((v) => [v, run.outcomes.filter((o) => o.verdict === v).length] as const)
+      .filter(([, n]) => n)
+      .map(([v, n]) => `${verdictText(v, lang)} ${n}`)
+      .join(" / ");
+    console.log(`\n${tally}`);
+    deliver(verifyReport(file, run, { fileName, dialect: db.dialect, lang }), `the results of ${run.outcomes.length} step(s)`);
+    if (values["save-session"]) {
+      const session: Session = {
+        version: 1,
+        id: randomUUID(),
+        startedAt: run.startedAt,
+        dialect: db.dialect,
+        tables: run.tables,
+        // the checked steps, named with their result (Excel evidence shows the names)
+        steps: run.outcomes.flatMap((o, i) => stepOf(o, i, `[${verdictText(o.verdict, lang)}] ${o.step.title}`) ?? []).map((s, i) => ({ ...s, id: i + 1 })),
+      };
+      const sessionFile = sessionPath(resolve(".ashiato/sessions"), session);
+      saveSession(sessionFile, session);
+      console.log(`Saved the changes to ${shown(sessionFile)} (Excel evidence: ashiato export ${shown(sessionFile)})`);
+    }
+    if (run.outcomes.some((o) => o.verdict === "ng" || o.verdict === "error")) process.exitCode = 1;
+  } finally {
+    process.off("SIGINT", interrupted);
+    input.close();
+    await db.close();
+  }
+}
+
+/**
+ * Lines typed at the terminal, one per question. On a terminal, lines typed before the question
+ * (Enter pressed twice) are dropped: they would answer a step the person hasn't read yet.
+ */
+function lineReader() {
+  const rl = createInterface({ input: process.stdin });
+  const typed: string[] = [];
+  const waiting: ((line: string | null) => void)[] = [];
+  let ended = false;
+  rl.on("line", (line) => {
+    const w = waiting.shift();
+    if (w) w(line);
+    else typed.push(line);
+  });
+  rl.on("close", () => {
+    ended = true;
+    for (const w of waiting.splice(0)) w(null);
+  });
+  return {
+    ask(prompt: string): Promise<string | null> {
+      process.stdout.write(prompt);
+      if (process.stdin.isTTY) typed.length = 0;
+      if (typed.length) return Promise.resolve(typed.shift()!);
+      if (ended) return Promise.resolve(null);
+      return new Promise((r) => waiting.push(r));
+    },
+    close: () => rl.close(),
+  };
 }
 
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
@@ -240,6 +372,7 @@ export async function main(argv: string[]): Promise<void> {
       "share-values": { type: "boolean" },
       "no-views": { type: "boolean" },
       "no-clip": { type: "boolean" },
+      "save-session": { type: "boolean" },
       version: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -356,6 +489,7 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (command === "query") return runQueryCommand(rest, values, dbUrl);
+  if (command === "verify") return runVerifyCommand(rest, values, dbUrl);
 
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   const db = await connect(dbUrl);
