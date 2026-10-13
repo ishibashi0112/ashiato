@@ -9,6 +9,7 @@
   "scripts": {
     "build": "pnpm --filter @ashiato/ui build && pnpm --filter ashiato build",
     "test": "pnpm --filter ashiato test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "release": "pnpm --filter ashiato publish"
   }
 }

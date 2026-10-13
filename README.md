@@ -319,6 +319,7 @@ pnpm install
 pnpm test          # unit tests + SQLite; set ASHIATO_TEST_{POSTGRES,MYSQL,MSSQL,ORACLE}_URL for real servers
 pnpm build         # UI + CLI into packages/ashiato/dist
 node packages/ashiato/dist/bin.js record --db sqlite:./dev.db
+pnpm release       # maintainers: publish packages/ashiato to npm (typecheck, build and tests run first)
 ```
 
 ---

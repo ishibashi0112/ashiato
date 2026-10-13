@@ -26,7 +26,7 @@
     "node": ">=22.5"
   },
   "bin": {
-    "ashiato": "./dist/bin.js"
+    "ashiato": "dist/bin.js"
   },
   "exports": {
     ".": {
