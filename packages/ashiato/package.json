@@ -1,6 +1,6 @@
 {
   "name": "ashiato",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Record which rows your app inserts, updates and deletes — with read-only database access.",
   "license": "MIT",
   "type": "module",
