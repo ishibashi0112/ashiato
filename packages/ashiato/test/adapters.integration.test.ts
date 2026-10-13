@@ -37,6 +37,8 @@ interface Dialect {
   fill: (table: string, n: number) => string;
   /** An extra column for the large table, to cover the adapter's other signature (SQL Server rowversion). */
   extraColumn?: string;
+  /** Statements that put a comment on the table, and on one of its columns (MySQL restates the column's type). */
+  comment: { table: (t: string, text: string) => string; column: (t: string, column: string, type: string, text: string) => string };
   writer: (url: string) => Promise<Writer>;
 }
 
@@ -60,6 +62,7 @@ const dialects: Record<string, Dialect> = {
     date: "'2026-10-11'",
     addMicrosecond: "ts + interval '1 microsecond'",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT g, g % 10, '${NOTE}' FROM generate_series(1, ${n}) g`,
+    comment: { table: (t, text) => `COMMENT ON TABLE ${t} IS '${text}'`, column: (t, c, _type, text) => `COMMENT ON COLUMN ${t}.${c} IS '${text}'` },
     async writer(url) {
       const pg = await loadDriver<typeof import("pg")>("pg", "PostgreSQL");
       const c = new pg.Client({ connectionString: url });
@@ -93,6 +96,7 @@ const dialects: Record<string, Dialect> = {
       const nums = `SELECT a.i + 10 * b.i + 100 * c.i + 1000 * d.i + 1 AS i FROM ${digit} a, ${digit} b, ${digit} c, ${digit} d`;
       return `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (${nums}) s WHERE i <= ${n}`;
     },
+    comment: { table: (t, text) => `ALTER TABLE ${t} COMMENT = '${text}'`, column: (t, c, type, text) => `ALTER TABLE ${t} MODIFY ${c} ${type} COMMENT '${text}'` },
     async writer(url) {
       const mysql = await loadDriver<typeof import("mysql2/promise")>("mysql2/promise", "MySQL");
       const c = await mysql.createConnection({ uri: url });
@@ -120,6 +124,10 @@ const dialects: Record<string, Dialect> = {
     fill: (t, n) =>
       `INSERT INTO ${t} (id, qty, note) SELECT i, i % 10, '${NOTE}' FROM (SELECT TOP (${n}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i FROM sys.all_objects a CROSS JOIN sys.all_objects b) s`,
     extraColumn: "rv ROWVERSION",
+    comment: {
+      table: (t, text) => `EXEC sp_addextendedproperty N'MS_Description', N'${text}', N'SCHEMA', N'dbo', N'TABLE', N'${t}'`,
+      column: (t, c, _type, text) => `EXEC sp_addextendedproperty N'MS_Description', N'${text}', N'SCHEMA', N'dbo', N'TABLE', N'${t}', N'COLUMN', N'${c}'`,
+    },
     async writer(url) {
       const mssql = await loadDriver<typeof import("mssql")>("mssql", "SQL Server");
       const u = new URL(url);
@@ -155,6 +163,7 @@ const dialects: Record<string, Dialect> = {
     date: "DATE '2026-10-11'",
     addMicrosecond: "ts + NUMTODSINTERVAL(0.000001, 'SECOND')",
     fill: (t, n) => `INSERT INTO ${t} (id, qty, note) SELECT LEVEL, MOD(LEVEL, 10), '${NOTE}' FROM dual CONNECT BY LEVEL <= ${n}`,
+    comment: { table: (t, text) => `COMMENT ON TABLE ${t} IS '${text}'`, column: (t, c, _type, text) => `COMMENT ON COLUMN ${t}.${c} IS '${text}'` },
     async writer(url) {
       const oracledb = await loadDriver<typeof import("oracledb")>("oracledb", "Oracle");
       const open = async (connUrl: string) => {
@@ -442,6 +451,65 @@ for (const [dialect, d] of Object.entries(dialects)) {
         expect(await version()).not.toBe(altered);
       } finally {
         await db.close();
+        await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+        await w.close();
+      }
+    }, 60_000);
+
+    it("describes tables and views, and runs a statement read-only, as a SELECT-only user (ashiato schema / query)", async () => {
+      const w = await d.writer(url!);
+      const [t, v] = ["ashiato_chk", "ashiato_chk_v"];
+      await w.run(`DROP VIEW ${v}`).catch(() => undefined);
+      await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+      await w.run(`CREATE TABLE ${t} (id INT PRIMARY KEY, qty INT NOT NULL, note VARCHAR(20), amount ${d.dec}, day DATE)`);
+      await w.run(`CREATE VIEW ${v} AS SELECT id, qty FROM ${t}`);
+      await w.run(d.comment.table(t, "受注"));
+      await w.run(d.comment.column(t, "qty", "INT NOT NULL", "数量"));
+      for (let i = 1; i <= 5; i++) await w.run(`INSERT INTO ${t} (id, qty, note, amount, day) VALUES (${i}, ${i * 10}, 'n${i}', 1.000000000000000001, ${d.date})`);
+      const db = await connect(await w.readOnlyUrl([t, v]));
+      const owner = await connect(url!);
+      try {
+        const view = (await db.listViews!()).find((x) => x.name.toLowerCase() === v);
+        expect(view).toBeTruthy();
+        const table = (await db.listTables()).find((x) => x.name.toLowerCase() === t)!;
+        const info = await db.describeTable!(table);
+        expect(info.comment).toBe("受注");
+        const cols = Object.fromEntries(info.columns.map((c) => [c.name.toLowerCase(), c]));
+        expect(Object.keys(cols)).toEqual(["id", "qty", "note", "amount", "day"]);
+        expect(cols.qty).toMatchObject({ nullable: false, comment: "数量" });
+        expect(cols.note).toMatchObject({ nullable: true });
+        expect(cols.note!.comment).toBeUndefined();
+        expect(cols.note!.type).toMatch(/^(varchar2?|character varying)\(20( BYTE)?\)$/i);
+        expect(cols.amount!.type).toMatch(/^(numeric|decimal|number)\(38,\s?18\)$/i);
+        expect((await db.describeTable!(view!)).columns.map((c) => c.name.toLowerCase())).toEqual(["id", "qty"]);
+
+        const sql = `SELECT id, qty, note, amount, day FROM ${t} WHERE qty > 0 ORDER BY id`;
+        const first = await db.runQuery!(sql, 3);
+        expect(first.columns.map((c) => c.toLowerCase())).toEqual(["id", "qty", "note", "amount", "day"]);
+        expect(first.more).toBe(true);
+        expect(first.rows.map((r) => [Number(r[0]), r[2]])).toEqual([[1, "n1"], [2, "n2"], [3, "n3"]]);
+        // exact decimals (SQL Server's driver hands decimals over as floats: CAST them to see every digit),
+        // and dates as written (not shifted into UTC)
+        expect(first.rows[0]![3]).toBe(dialect === "mssql" ? 1 : "1.000000000000000001");
+        expect(first.rows[0]![4]).toMatch(/^2026-10-11( 00:00:00)?$/);
+        const all = await db.runQuery!(sql, 10);
+        expect([all.rows.length, all.more]).toEqual([5, false]);
+        // the connection is fine after a result was cut off, and after an error
+        await expect(db.runQuery!("SELECT * FROM ashiato_missing", 10)).rejects.toThrow();
+        expect((await db.runQuery!(`SELECT COUNT(*) AS n FROM ${v}`, 10)).rows).toEqual([[5]]);
+
+        // the second guard, for a user that could write: a read-only transaction, or one rolled back (SQL Server)
+        if (dialect === "postgres" || dialect === "oracle") {
+          await expect(owner.runQuery!(`SELECT id FROM ${t} FOR UPDATE`, 10)).rejects.toThrow();
+        }
+        if (dialect === "mssql") {
+          await owner.runQuery!(`SELECT 1 AS a UPDATE ${t} SET qty = 0`, 10);
+          expect((await owner.runQuery!(`SELECT qty FROM ${t} WHERE id = 1`, 10)).rows).toEqual([[10]]);
+        }
+      } finally {
+        await db.close();
+        await owner.close();
+        await w.run(`DROP VIEW ${v}`).catch(() => undefined);
         await w.run(`DROP TABLE ${t}`).catch(() => undefined);
         await w.close();
       }

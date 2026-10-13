@@ -1,6 +1,6 @@
-import { normalizeRow } from "../core/normalize.js";
+import { normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
-import type { DbAdapter } from "./types.js";
+import type { DbAdapter, QueryResult } from "./types.js";
 
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 
@@ -37,6 +37,41 @@ export async function connectSqlite(path: string): Promise<DbAdapter> {
     },
     async readRows(t: TableRef): Promise<Row[]> {
       return all(`SELECT * FROM ${q(t.name)}`).map(normalizeRow);
+    },
+    async listViews() {
+      return all("SELECT name FROM sqlite_schema WHERE type = 'view' ORDER BY name").map((r) => ({ name: String(r.name) }));
+    },
+    async describeTable(t: TableRef) {
+      // SQLite keeps no comments; the declared type is whatever CREATE TABLE said (empty when none)
+      const columns = all(`PRAGMA table_info(${q(t.name)})`).map((c) => ({
+        name: String(c.name),
+        type: String(c.type ?? ""),
+        nullable: Number(c.notnull) === 0 && Number(c.pk) === 0,
+      }));
+      return { columns };
+    },
+    async runQuery(sql: string, maxRows: number): Promise<QueryResult> {
+      // the database is opened read-only, so nothing can be written whatever the statement says
+      const stmt = db.prepare(sql);
+      stmt.setReadBigInts(true);
+      const rows: QueryResult["rows"] = [];
+      // Node.js 22.16 and later: rows as arrays (two columns may share a name), read only as far as needed
+      if (typeof stmt.setReturnArrays === "function" && typeof stmt.iterate === "function") {
+        stmt.setReturnArrays(true);
+        let more = false;
+        for (const row of stmt.iterate() as Iterable<unknown[]>) {
+          if (rows.length === maxRows) {
+            more = true;
+            break;
+          }
+          rows.push(row.map(normalizeValue));
+        }
+        return { columns: stmt.columns().map((c) => c.name), rows, more };
+      }
+      const all = stmt.all() as Record<string, unknown>[];
+      const columns = Object.keys(all[0] ?? {});
+      for (const r of all.slice(0, maxRows)) rows.push(columns.map((c) => normalizeValue(r[c])));
+      return { columns, rows, more: all.length > maxRows };
     },
     async close() {
       db.close();

@@ -76,7 +76,7 @@
 > 今の ashiato は、SQL Server には **SQL Server 認証**(ユーザー名とパスワード)でしか接続できません。Windows 認証しか許可されていない場合は接続できないので、試用の前に知らせてください。ドメインのアカウントとパスワードで接続する方式(NTLM)なら追加できます。
 
 > **注:Oracle の接続方式**
-> Oracle には Thin モード(Oracle Instant Client のインストールが不要な方式)で接続します。DB 側でネットワーク暗号化(Native Network Encryption)が必須になっている場合や、古い方式(10G)のパスワードのアカウントでは接続できません。そのときのエラーと対処は [7. 困ったとき](#7-困ったとき) にあります。
+> Oracle には Thin モード(Oracle Instant Client のインストールが不要な方式)で接続します。DB 側でネットワーク暗号化(Native Network Encryption)が必須になっている場合や、古い方式(10G)のパスワードのアカウントでは接続できません。その場合は、URL に `&client=thick` を付けると Thick モード(Oracle Instant Client を使う方式)で接続できます。PC に Oracle Instant Client(または Oracle Client)が必要です。エラーと対処は [7. 困ったとき](#7-困ったとき) にあります。
 
 ### アプリ
 
@@ -145,6 +145,7 @@ npx ashiato --help
 | SQL Server(名前付きインスタンス) | `mssql://ashiato_ro:パスワード@db-dev01/SalesDev?instance=DEV` |
 | SQL Server(通信の暗号化が必須の場合) | `mssql://ashiato_ro:パスワード@db-dev01:1433/SalesDev?encrypt=true` |
 | Oracle | `oracle://ashiato_ro:パスワード@ora-dev01:1521/DEVPDB?schema=APP_OWNER` |
+| Oracle(Thick モード) | `oracle://ashiato_ro:パスワード@ora-dev01:1521/DEVPDB?schema=APP_OWNER&client=thick&libDir=C:\oracle\instantclient_19_25` |
 
 - パスワードなどに記号が入っているときは、URL 用の書き方に置き換えます。例:`p@ss#1` → `p%40ss%231`
 
@@ -155,6 +156,7 @@ npx ashiato --help
 - **SQL Server の名前付きインスタンス**:`?instance=` を付けると、SQL Server Browser(UDP 1434)に問い合わせてポート番号を調べます(このとき URL のポート番号は使われません)。インスタンスのポート番号が分かっているなら、`?instance=` を付けずに `ホスト:ポート` で指定する方が確実です
 - **SQL Server の暗号化**:`encrypt=true` のとき、サーバー証明書は検証しません(社内の自己署名証明書でもつながります)
 - **Oracle**:`/` の後ろは**サービス名**です。`?schema=` には**テーブルの所有者**を指定します。付けないと、ログインしたユーザー自身のスキーマを見に行くので、参照専用ユーザーではテーブルが 0 件になります
+- **Oracle の Thick モード**:`client=thick` を付けると、Oracle Instant Client を使って接続します。`libDir=` には Instant Client のフォルダー(`oci.dll` のあるフォルダー)を指定します。`PATH` に入っていれば省けます。Thin モードで `NJS-116` / `NJS-533` / `NJS-138` が出るときに使います
 - 1 回の記録で対象にできるのは、SQL Server は 1 つの DB(その中のすべてのスキーマ)、Oracle は 1 つのスキーマです
 
 URL を毎回入力しなくて済むように、環境変数 `ASHIATO_DB_URL` に入れておきます。`--db` を省くと、この値が使われます。PowerShell では `'` で囲むと、`&` や `%` などの記号がそのまま渡ります。PowerShell の画面を閉じると消えます。
@@ -184,6 +186,25 @@ dbo.WorkLog                                     100 rows  key: (none)
 - **`key: (none)`**:主キーのないテーブルです。比較はできますが、更新が「削除+追加」として表示されます
 
 > このコマンドはすべてのテーブルの行数を数えるので、テーブルが非常に多い DB では時間がかかることがあります。
+
+### 3-3. AI チャット用に、テーブル定義を書き出して SQL を実行する(任意)
+
+AI エージェントは使えず、チャット(Copilot Chat など)だけが使える場合の DB 確認です。テーブル定義をチャットに渡し、チャットが書いた SELECT を手元で実行して、結果を貼り返します。
+
+```powershell
+npx ashiato schema --tables "Orders,OrderDetails"   # docs\db\schema.md に書き出します(行の値は入りません)
+mkdir checks
+notepad checks\check.sql                            # チャットが書いた SELECT を保存します
+npx ashiato query checks\check.sql                  # 結果がクリップボードに入ります。チャットに貼ります
+```
+
+確認すること:
+
+- `docs\db\schema.md` に、列・型・主キー・コメント(SQL Server の `MS_Description`、Oracle の `COMMENT`)が出ている
+- 貼った結果を、チャットが正しく読めている(表が崩れていない、日本語が化けていない)
+- `UPDATE` などを書いたファイルを `query` に渡すと、1 文も実行せず、理由がクリップボードに入る
+
+> 結果には DB の値が入ります。チャットに貼ってよいかは社内の決まりに従い、テスト用の DB で試してください。
 
 ---
 
@@ -378,9 +399,11 @@ String(window.chrome.webview.postMessage).includes("[native code]")   // false �
 | `ORA-28001`(Oracle) | パスワードの期限が切れています。ashiato からは変更できないので、SQL*Plus などで変更するか、DBA に依頼します |
 | `ORA-01045`(Oracle) | `CREATE SESSION` 権限がありません |
 | `NJS-503` / `NJS-510` / `NJS-511`(Oracle) | DB に届いていません。ホスト名、ポート番号、ファイアウォールを確認します |
-| `NJS-138`(Oracle) | DB が 11g 以前で、Thin モードでは接続できません。報告してください |
-| `NJS-116`(Oracle) | アカウントのパスワードが古い方式(10G)です。DBA にパスワードを設定し直してもらうと解消することがあります。だめなら報告してください |
-| `NJS-533`(Oracle。`Native Network Encryption ... only supported in node-oracledb thick mode`) | DB 側でネットワーク暗号化(またはチェックサム)が必須になっていて、Thin モードでは接続できません。報告してください |
+| `NJS-138`(Oracle) | DB が 11g 以前で、Thin モードでは接続できません。URL に `&client=thick` を付けて Thick モードで接続します([3-1](#3-1-接続-url-を作る)) |
+| `NJS-116`(Oracle) | アカウントのパスワードが古い方式(10G)です。URL に `&client=thick` を付けて Thick モードで接続するか、DBA にパスワードを設定し直してもらいます |
+| `NJS-533`(Oracle。`Native Network Encryption ... only supported in node-oracledb thick mode`) | DB 側でネットワーク暗号化(またはチェックサム)が必須になっていて、Thin モードでは接続できません。URL に `&client=thick` を付けて Thick モードで接続します |
+| `Thick mode needs Oracle Instant Client ...`(Oracle) | Oracle Instant Client が見つかりません。`libDir=` に Instant Client のフォルダーを指定するか、Instant Client を入れてください。PC の Node.js と Instant Client のビット数(64 ビット)が合っているかも確認します |
+| `query` で `Nothing was run: ...` | SELECT だけではない文があるため、1 文も実行していません。クリップボードに入った理由をチャットに貼り、書き直してもらいます |
 | `NJS-518`(Oracle。`Service ... is not registered with the listener`) | サービス名が違います。tnsnames.ora の `SERVICE_NAME` を使います |
 | `Tables not found: ...`(または `--tables` なしで `Watching 0 table(s)`) | `--tables` のテーブル名が違うか、そのテーブルの SELECT 権限がないか、Oracle で `?schema=` を付けていません。`npx ashiato tables` の表示どおりに書き、全体を `"` で囲みます |
 | 記録中にアプリが作ったテーブルが出てこない | 参照専用ユーザーにそのテーブルを読む権限がありません(テーブルごとの `GRANT` では付きません。[1 章](#1-事前に確認しておくこと)の DB を参照)。`--tables` を付けている場合は、その名前のテーブルしか監視しません |

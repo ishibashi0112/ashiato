@@ -1,4 +1,4 @@
-import type { Row, TableRef } from "../core/types.js";
+import type { JsonValue, Row, TableRef } from "../core/types.js";
 
 /** A row read together with its bucket and signature (see `DbAdapter.readBuckets`). */
 export interface BucketedRow {
@@ -21,6 +21,32 @@ export interface ListedTable extends TableRef {
    * primary key), so that what was cached about it is read again: compared as text, never parsed.
    */
   version?: string;
+}
+
+/** A column as `describeTable` returns it. */
+export interface ColumnInfo {
+  name: string;
+  /** The database's type with its length, precision or scale: varchar(20), decimal(10,2), VARCHAR2(20 BYTE). */
+  type: string;
+  nullable: boolean;
+  /** The column's comment: SQL Server's MS_Description, COMMENT ON (Oracle, PostgreSQL), MySQL's COMMENT. */
+  comment?: string;
+}
+
+/** A table or view as `describeTable` returns it. No columns: it isn't there, or the user can't read it. */
+export interface TableInfo {
+  columns: ColumnInfo[];
+  comment?: string;
+}
+
+/** What one statement run by `runQuery` returned. */
+export interface QueryResult {
+  /** Column names in order. The same name can appear twice (two tables' `id`). */
+  columns: string[];
+  /** At most the rows asked for, values normalized like `readRows`, with date and time columns as text. */
+  rows: JsonValue[][];
+  /** The statement returned more rows than were asked for. */
+  more: boolean;
 }
 
 /**
@@ -48,5 +74,15 @@ export interface DbAdapter {
   readBuckets?(table: TableRef, key: string[], buckets: number, which?: number[]): Promise<BucketedRow[]>;
   /** Optional. Drops what the adapter cached about a table (column lists...): it was created again, altered, or is gone. */
   forget?(table: TableRef): void;
+  /** Optional, for `ashiato schema`: the views the user can read, in the schemas `listTables` looks at. */
+  listViews?(): Promise<TableRef[]>;
+  /** Optional, for `ashiato schema`: the columns and comments of a table or view. */
+  describeTable?(table: TableRef): Promise<TableInfo>;
+  /**
+   * Optional, for `ashiato query`: runs one statement someone wrote (a person, or an AI in a chat)
+   * and returns its first `maxRows` rows. The caller has checked it is a SELECT; where the database
+   * has read-only transactions the statement runs in one, as a second guard, and nothing is committed.
+   */
+  runQuery?(sql: string, maxRows: number): Promise<QueryResult>;
   close(): Promise<void>;
 }

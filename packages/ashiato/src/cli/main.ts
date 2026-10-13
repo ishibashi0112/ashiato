@@ -1,10 +1,14 @@
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { connect } from "../adapters/index.js";
+import { connect, dialectOf } from "../adapters/index.js";
 import { serveMcp } from "../agent/mcp.js";
+import { writeClipboard } from "../chat/clipboard.js";
+import { decodeText } from "../chat/decode.js";
+import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
+import { schemaMarkdown } from "../chat/schema.js";
 import { fileSource, recorderSource } from "../agent/source.js";
 import { stepLine, stepShape, stepText } from "../agent/text.js";
 import { agentTools } from "../agent/tools.js";
@@ -15,7 +19,7 @@ import { MediaStore } from "../core/media.js";
 import { evidenceBase, loadSession, outputFile, saveSession } from "../core/store.js";
 import type { TableRef } from "../core/types.js";
 import { EXPORT_FORMATS, exportEvidence, type ExportFormat } from "../export/index.js";
-import type { Lang } from "../export/text.js";
+import { langOf, type Lang } from "../export/text.js";
 import { listen, startRecording, uiDir } from "./recording.js";
 
 const HELP = `ashiato — record what your app changes in the database
@@ -29,12 +33,14 @@ Usage:
   ashiato checkpoint [label] [--recorder <url>] [--json] [--no-values]
   ashiato steps [<session.json>] [--recorder <url>] [--since <id>] [--full] [--json] [--no-values]
   ashiato mcp --db <url> [record options] [--share-values]   (or --recorder <url>)
+  ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--out docs/db/schema.md] [--lang ja|en]
+  ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
                           sqlite:./dev.db
                           mssql://user:pass@host:1433/db?instance=SQLEXPRESS
-                          oracle://user:pass@host:1521/service?schema=OWNER
+                          oracle://user:pass@host:1521/service?schema=OWNER  (&client=thick for Thick mode)
                           postgres://user:pass@host:5432/db
                           mysql://user:pass@host:3306/db
   --tables <list>         Comma-separated tables to watch (default: all, including ones created while recording)
@@ -73,6 +79,20 @@ For AI agents and scripts:
                           counts only, and gets the paths of generated tests and evidence, not their
                           contents (an AI in the cloud would otherwise receive your data).
 
+For AI chats (no agent: you carry the text between the chat and this machine):
+  schema                  Writes the definitions of the tables and views (columns, types, primary keys,
+                          comments) as Markdown, for the chat to write SQL against
+  query                   Runs the statements of .sql files (a folder: its .sql files) read-only and
+                          copies the results to the clipboard as Markdown, to paste into the chat.
+                          Only SELECT / WITH statements: if any statement could write, none is run.
+  --tables <list>         schema: tables and views to include; * and ? match any characters
+  --no-views              schema: tables only
+  --out <file>            schema: where to write it (default docs/db/schema.md; - for the terminal)
+                          query: also write the results to this file (- for the terminal)
+  --max-rows <n>          query: rows shown per statement (default 50)
+  --no-clip               query: don't copy to the clipboard (without --out, the results are printed)
+  --lang <ja|en>          schema / query: language of the text around the data (default: the machine's)
+
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
 
@@ -87,6 +107,104 @@ function packageVersion(): string {
     }
   }
   return "unknown";
+}
+
+/** About what a chat (Microsoft 365 Copilot Chat) takes in one paste. */
+const PASTE_LIMIT = 100_000;
+
+const langOption = (v?: string): Lang => {
+  if (v && v !== "ja" && v !== "en") throw new Error("--lang must be ja or en");
+  return (v as Lang | undefined) ?? langOf();
+};
+
+/** A path as the report and the terminal show it: relative to here when it is below here, with / between folders. */
+const shown = (path: string) => {
+  const rel = relative(process.cwd(), path);
+  return (rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path).split(sep).join("/");
+};
+
+/** The .sql files named (a folder: its .sql files, by name), read as UTF-8 or Shift_JIS. */
+function readSqlFiles(paths: string[]): SqlFile[] {
+  const files: string[] = [];
+  for (const p of paths) {
+    const path = resolve(p);
+    if (statSync(path).isDirectory()) {
+      const inFolder = readdirSync(path)
+        .filter((f) => /\.sql$/i.test(f))
+        .sort()
+        .map((f) => join(path, f));
+      if (!inFolder.length) throw new Error(`No .sql files in ${p}`);
+      files.push(...inFolder);
+    } else files.push(path);
+  }
+  return files.map((f) => {
+    try {
+      return { name: shown(f), text: decodeText(readFileSync(f)) };
+    } catch (e) {
+      throw new Error(`${shown(f)}: ${(e as Error).message}`);
+    }
+  });
+}
+
+async function runQueryCommand(paths: string[], values: { db?: string; out?: string; "max-rows"?: string; "no-clip"?: boolean; lang?: string }, dbUrl?: string) {
+  if (!paths.length) throw new Error("Usage: ashiato query <file.sql | folder>... --db <url>");
+  if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
+  const dialect = dialectOf(dbUrl);
+  if (!dialect) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
+  const lang = langOption(values.lang);
+  const maxRows = Number(values["max-rows"] ?? 50);
+  if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 10_000) throw new Error("--max-rows takes a number from 1 to 10000");
+
+  // with --out -, stdout carries the results only
+  const info = (m: string) => (values.out === "-" ? console.error(m) : console.log(m));
+  const deliver = (markdown: string, what: string) => {
+    if (values.out === "-") process.stdout.write(markdown);
+    else if (values.out) {
+      const out = resolve(values.out);
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, markdown);
+      console.log(`Wrote ${shown(out)}`);
+    }
+    if (values["no-clip"]) {
+      if (!values.out) process.stdout.write(markdown);
+    } else {
+      const clip = writeClipboard(markdown);
+      if (clip.ok) info(`Copied ${what} to the clipboard (${markdown.length.toLocaleString("en-US")} characters): paste it into the chat.`);
+      else if (values.out) console.error(`Could not copy to the clipboard (${clip.message}).`);
+      else {
+        // nowhere else to go: show it here
+        console.error(`Could not copy to the clipboard (${clip.message}). The text to paste:\n`);
+        process.stdout.write(markdown);
+      }
+    }
+    if (markdown.length > PASTE_LIMIT) info(`Note: a chat may cut off text this long (more than about ${PASTE_LIMIT.toLocaleString("en-US")} characters): lower --max-rows or run fewer statements.`);
+  };
+
+  const planned = planQueries(readSqlFiles(paths), dialect);
+  if (!planned.length) throw new Error("No statements to run");
+  const refused = planned.filter((p) => p.problem);
+  if (refused.length) {
+    // nothing is run, and the reasons go back to the chat so that it can rewrite the statements
+    for (const p of refused) console.error(`${p.file}:${p.statement.line}: ${p.problem!.message}`);
+    console.error(`Nothing was run: ${refused.length} statement(s) don't only read.`);
+    deliver(refusedReport(planned, lang), "why nothing was run");
+    process.exitCode = 1;
+    return;
+  }
+
+  const db = await connect(dbUrl);
+  try {
+    let n = 0;
+    const outcomes = await runPlanned(db, planned, maxRows, (o) => {
+      const label = o.statement.title.split("\n")[0] || `${o.file}:${o.statement.line}`;
+      const what = o.error !== undefined ? `error: ${o.error.split("\n")[0]}` : `${o.result!.rows.length}${o.result!.more ? "+" : ""} row(s)`;
+      info(`${String(++n).padStart(3)}. ${padColumns(label, 50)} ${what}  (${o.ms} ms)`);
+    });
+    const errors = outcomes.filter((o) => o.error !== undefined).length;
+    deliver(queryReport(outcomes, { dialect: db.dialect, lang, maxRows }), `the results of ${outcomes.length} statement(s)${errors ? `, ${errors} with an error,` : ""}`);
+  } finally {
+    await db.close();
+  }
 }
 
 const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : undefined);
@@ -120,6 +238,8 @@ export async function main(argv: string[]): Promise<void> {
       json: { type: "boolean" },
       "no-values": { type: "boolean" },
       "share-values": { type: "boolean" },
+      "no-views": { type: "boolean" },
+      "no-clip": { type: "boolean" },
       version: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -235,8 +355,27 @@ export async function main(argv: string[]): Promise<void> {
     return close();
   }
 
+  if (command === "query") return runQueryCommand(rest, values, dbUrl);
+
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   const db = await connect(dbUrl);
+
+  if (command === "schema") {
+    const lang = langOption(values.lang);
+    try {
+      const { markdown, tables, views, unreadable } = await schemaMarkdown(db, { tables: list(values.tables), views: !values["no-views"], lang });
+      if (values.out === "-") return void process.stdout.write(markdown);
+      const out = resolve(values.out ?? join("docs", "db", "schema.md"));
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, markdown);
+      console.log(`Wrote ${shown(out)} (${tables} table(s), ${views} view(s); ${markdown.length.toLocaleString("en-US")} characters)`);
+      if (unreadable.length) console.log(`Could not read: ${unreadable.join(", ")}`);
+      if (markdown.length > PASTE_LIMIT) console.log(`Note: that is more than a chat takes in one paste (about ${PASTE_LIMIT.toLocaleString("en-US")} characters): pick the tables with --tables.`);
+    } finally {
+      await db.close();
+    }
+    return;
+  }
 
   if (command === "tables") {
     if (values.json) {

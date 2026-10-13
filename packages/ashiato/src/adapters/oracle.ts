@@ -1,8 +1,8 @@
-import { exactDecimal, normalizeRow } from "../core/normalize.js";
+import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
 import { loadDriver } from "./load.js";
-import type { DbAdapter } from "./types.js";
+import type { ColumnInfo, DbAdapter, QueryResult } from "./types.js";
 
 type OracleDb = typeof import("oracledb");
 
@@ -38,18 +38,85 @@ function fetchTypeHandler(oracledb: OracleDb) {
   };
 }
 
-/** oracle://user:password@host:1521/serviceName?schema=OWNER — uses node-oracledb Thin mode (no Instant Client needed). */
+const text = (v: unknown) => (v === null || v === undefined || v === "" ? undefined : String(v));
+
+/** ALL_TAB_COLUMNS → a type as written in CREATE TABLE: VARCHAR2(20 BYTE), NUMBER(10,2), NUMBER, DATE. */
+function columnInfo(c: Record<string, unknown>): ColumnInfo {
+  const type = String(c.DATA_TYPE);
+  const precision = c.DATA_PRECISION === null ? undefined : Number(c.DATA_PRECISION);
+  const scale = c.DATA_SCALE === null ? undefined : Number(c.DATA_SCALE);
+  let full = type;
+  if (/^N?(VAR)?CHAR2?$/.test(type)) {
+    // NCHAR / NVARCHAR2 always count characters; the others say which (NLS_LENGTH_SEMANTICS)
+    full = type.startsWith("N") ? `${type}(${c.CHAR_LENGTH})` : `${type}(${c.CHAR_USED === "C" ? `${c.CHAR_LENGTH} CHAR` : `${c.DATA_LENGTH} BYTE`})`;
+  } else if (type === "RAW") full = `RAW(${c.DATA_LENGTH})`;
+  else if (type === "NUMBER" && precision !== undefined) full = scale ? `NUMBER(${precision},${scale})` : `NUMBER(${precision})`;
+  else if (type === "NUMBER" && scale === 0) full = "NUMBER(*,0)";
+  else if (type === "FLOAT" && precision !== undefined) full = `FLOAT(${precision})`;
+  return { name: String(c.COLUMN_NAME), type: full, nullable: c.NULLABLE !== "N", comment: text(c.COMMENTS) };
+}
+
+/**
+ * client=thick: node-oracledb Thick mode, through Oracle Instant Client (libDir=its folder, otherwise
+ * it is looked for on PATH). Needed for what Thin mode can't do: passwords of the old 10G kind,
+ * Native Network Encryption required by the server, Oracle Database 11g.
+ */
+function useThickMode(oracledb: OracleDb, url: URL): boolean {
+  const client = url.searchParams.get("client")?.toLowerCase();
+  if (!client || client === "thin") return false;
+  if (client !== "thick") throw new Error(`client=${client}: use client=thick (Oracle Instant Client), or leave it out for Thin mode`);
+  const libDir = url.searchParams.get("libDir") ?? undefined;
+  try {
+    // can be called again with the same folder; Thin mode can't be switched to Thick once it has connected
+    oracledb.initOracleClient(libDir ? { libDir } : {});
+  } catch (e) {
+    throw new Error(`Thick mode needs Oracle Instant Client ${libDir ? `in ${libDir}` : "on PATH (or libDir=<its folder> in the URL)"}: ${(e as Error).message}`);
+  }
+  return true;
+}
+
+/**
+ * A full connect descriptor. Thick mode reads host:port/service through the Instant Client's naming
+ * methods, and ORA-12154 follows where sqlnet.ora leaves EZCONNECT out; a descriptor needs none.
+ */
+function connectDescriptor(host: string, port: string, service: string): string {
+  for (const [label, value] of [["host", host], ["service name", service]] as const) {
+    // these would start another part of the descriptor
+    if (!value || /[()=\s]/.test(value)) throw new Error(`The Oracle ${label} "${value}" is empty or holds a bracket, = or a space`);
+  }
+  return `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=${host})(PORT=${port}))(CONNECT_DATA=(SERVICE_NAME=${service})))`;
+}
+
+/** Errors Thin mode gives where Thick mode connects: they say what to add to the URL. */
+function thinModeHint(e: unknown): unknown {
+  if (!(e instanceof Error) || !/^NJS-(116|138|533)\b/.test(e.message)) return e;
+  return new Error(`${e.message}\nThin mode can't connect to this database: add client=thick to the URL (needs Oracle Instant Client, see the README).`);
+}
+
+/**
+ * oracle://user:password@host:1521/serviceName?schema=OWNER — node-oracledb Thin mode (no Instant
+ * Client needed), or Thick mode with client=thick.
+ */
 export async function connectOracle(url: URL): Promise<DbAdapter> {
   const oracledb = await loadDriver<OracleDb>("oracledb", "Oracle");
+  const thick = useThickMode(oracledb, url);
+  const service = decodeURIComponent(url.pathname).replace(/^\//, "");
   // a pool of one checks the connection before use and reconnects after a restart or idle timeout
   const pool = await oracledb.createPool({
     user: decodeURIComponent(url.username),
     password: decodeURIComponent(url.password),
-    connectString: `${url.hostname}:${url.port || 1521}${decodeURIComponent(url.pathname)}`,
+    connectString: thick ? connectDescriptor(url.hostname, url.port || "1521", service) : `${url.hostname}:${url.port || 1521}/${service}`,
     poolMin: 0,
     poolMax: 1,
     poolPingInterval: 10,
   });
+  try {
+    // connect now, so a wrong password or a mode that can't connect shows up here
+    await (await pool.getConnection()).close();
+  } catch (e) {
+    await pool.close(0).catch(() => undefined);
+    throw thinModeHint(e);
+  }
   const handler = fetchTypeHandler(oracledb);
   const exec = async (sql: string, binds: Record<string, string> = {}) => {
     const conn = await pool.getConnection();
@@ -155,6 +222,51 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
     },
     forget(t) {
       columnLists.delete(name(t));
+    },
+    async listViews() {
+      const rows = await exec("SELECT OWNER, VIEW_NAME FROM ALL_VIEWS WHERE OWNER = :owner ORDER BY VIEW_NAME", { owner });
+      return rows.map((r) => ({ schema: String(r.OWNER), name: String(r.VIEW_NAME) }));
+    },
+    async describeTable(t) {
+      const binds = { owner: t.schema ?? owner, tbl: t.name };
+      const cols = await exec(
+        `SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_LENGTH, c.CHAR_LENGTH, c.CHAR_USED, c.DATA_PRECISION, c.DATA_SCALE, c.NULLABLE, m.COMMENTS
+           FROM ALL_TAB_COLUMNS c
+           LEFT JOIN ALL_COL_COMMENTS m ON m.OWNER = c.OWNER AND m.TABLE_NAME = c.TABLE_NAME AND m.COLUMN_NAME = c.COLUMN_NAME
+          WHERE c.OWNER = :owner AND c.TABLE_NAME = :tbl ORDER BY c.COLUMN_ID`,
+        binds,
+      );
+      const table = await exec("SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = :owner AND TABLE_NAME = :tbl", binds);
+      return { columns: cols.map(columnInfo), comment: text(table[0]?.COMMENTS) };
+    },
+    async runQuery(sql, maxRows) {
+      const run = async () => {
+        const conn = await pool.getConnection();
+        try {
+          // names without an owner are the ?schema= owner's tables, as in `ashiato schema` (no privilege needed)
+          if (url.searchParams.get("schema")) await conn.execute(`ALTER SESSION SET CURRENT_SCHEMA = ${q(owner)}`);
+          // a second guard: Oracle refuses to change anything in a read-only transaction (ORA-01456)
+          await conn.execute("SET TRANSACTION READ ONLY");
+          const res = await conn.execute(sql, [], { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: maxRows + 1, fetchTypeHandler: handler });
+          const rows = (res.rows ?? []) as unknown[][];
+          return {
+            columns: (res.metaData ?? []).map((m) => m.name),
+            rows: rows.slice(0, maxRows).map((r) => r.map(normalizeValue)),
+            more: rows.length > maxRows,
+          } satisfies QueryResult;
+        } finally {
+          await conn.rollback().catch(() => undefined);
+          await conn.close();
+        }
+      };
+      try {
+        return await run();
+      } catch (e) {
+        // ORA-01466: a read-only transaction can't read a table created or altered within the last second
+        if (!(e instanceof Error) || !e.message.startsWith("ORA-01466")) throw e;
+        await new Promise((r) => setTimeout(r, 1100));
+        return run();
+      }
     },
     async close() {
       await pool.close(0);

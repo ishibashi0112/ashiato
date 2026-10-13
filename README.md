@@ -200,6 +200,30 @@ npx ashiato tables --db <url> --json
 
 `checkpoint` and `steps` talk to a running `ashiato record` (default `http://127.0.0.1:4100`), or `steps` reads a saved session. They show values unless `--no-values` is given.
 
+## For AI chats (no agent)
+
+Where AI agents aren't allowed but a chat is (Microsoft 365 Copilot Chat, for example), you carry the text between the chat and your machine. Two commands make that one paste each way:
+
+```sh
+npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
+npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <file>] [--no-clip]
+```
+
+- **`schema`** writes the tables' and views' columns, types, primary keys and comments as Markdown (`docs/db/schema.md` by default), for the chat to write SQL against. No row values. `--tables` takes names or `*` / `?` patterns: a chat takes about 100,000 characters in one paste, so pick the tables of a large database.
+- **`query`** runs the statements of `.sql` files (a folder: its `.sql` files by name), one after another, and copies the results to the clipboard as Markdown: each statement with the comment above it, its SQL, and its first `--max-rows` rows. Paste that into the chat. A statement that fails shows the database's error and the others still run.
+
+```sql
+-- Orders whose total differs from their lines (none expected)
+SELECT o.order_no, o.total, SUM(l.qty * l.price) AS lines_total
+FROM orders o JOIN order_lines l ON l.order_no = o.order_no
+GROUP BY o.order_no, o.total
+HAVING o.total <> SUM(l.qty * l.price);
+```
+
+**Only reading.** `query` runs `SELECT` and `WITH` statements only. If any statement could write (`INSERT`, `UPDATE`, `SELECT ... INTO`, `FOR UPDATE`, `EXEC`, a second statement hidden in a SQL Server batch...), none is run, and what is copied says which statement and why, so that the chat can rewrite it. As second guards, statements run in a read-only transaction (PostgreSQL, MySQL, Oracle), in a transaction that is always rolled back (SQL Server), or on a database opened read-only (SQLite). Connect as a user that may only `SELECT` all the same (see below).
+
+**The results hold your data.** ashiato only puts them on your clipboard; pasting them into a chat sends them to that service. Check that your company allows it for the database you query (a test database, not production). Files are read as UTF-8 or Shift_JIS. Statements end with `;`, or a line with only `GO` or `/`. On SQL Server the driver hands decimals over as floating-point numbers: `CAST` a column with more than 15 significant digits to `varchar` to see all of them.
+
 ## Large tables
 
 Only the first snapshot reads every row. After that, the database splits each table into buckets of about 256 rows and returns a row count and a checksum per bucket. Only buckets whose checksum changed are read again, so a checkpoint where nothing changed transfers almost nothing. It is all plain `SELECT`s: no setting changes, no extra permissions.
@@ -234,7 +258,7 @@ The read-only user only sees the tables it may read. For new tables to be watche
 | Database | URL | Driver |
 | --- | --- | --- |
 | SQL Server | `mssql://user:pass@host:1433/db?instance=SQLEXPRESS` (options: `encrypt=true`, `applicationIntent=ReadOnly`, `requestTimeout=120000`) | `mssql` |
-| Oracle | `oracle://user:pass@host:1521/service?schema=OWNER` | `oracledb` (Thin mode, no Instant Client) |
+| Oracle | `oracle://user:pass@host:1521/service?schema=OWNER` | `oracledb` (Thin mode, no Instant Client). Add `client=thick` (and `libDir=<Instant Client folder>` unless it is on `PATH`) for Thick mode, which also connects with old 10G passwords (`NJS-116`), required network encryption (`NJS-533`) and 11g (`NJS-138`) |
 | PostgreSQL | `postgres://user:pass@host:5432/db` | `pg` |
 | MySQL / MariaDB | `mysql://user:pass@host:3306/db` | `mysql2` |
 | SQLite | `sqlite:./dev.db` | built in (Node.js 22.13+; 22.5–22.12 need `--experimental-sqlite`) |
@@ -462,6 +486,30 @@ npx ashiato tables --db <url> --json
 ```
 
 `checkpoint` と `steps` は起動中の `ashiato record`(既定 `http://127.0.0.1:4100`)と通信します。`steps` は保存済みのセッションも読めます。`--no-values` を付けない限り値を表示します。
+
+### AIチャット向け(エージェントなし)
+
+AIエージェントは使えないがチャット(Microsoft 365 Copilot Chat など)は使える環境では、チャットと手元のPCの間を人がテキストで運びます。次の2つのコマンドで、行き帰りとも1回の貼り付けで済みます。
+
+```sh
+npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
+npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <ファイル>] [--no-clip]
+```
+
+- **`schema`**:テーブルとビューの列・型・主キー・コメントを Markdown に書き出します(既定は `docs/db/schema.md`)。チャットのAIがこれを見て SQL を書きます。行の値は含みません。`--tables` には名前か `*`・`?` のパターンを指定します。チャットに1回で貼れるのは10万文字ほどなので、大きなDBではテーブルを絞ってください。
+- **`query`**:`.sql` ファイル(フォルダーならその中の `.sql` を名前順)の文を順に実行し、結果を Markdown でクリップボードに入れます。文ごとに、直前のコメント・SQL・先頭 `--max-rows` 行が入ります。それをチャットに貼ります。エラーになった文はDBのエラーを表示し、残りの文はそのまま実行します。
+
+```sql
+-- 合計が明細の合計と一致しない受注(0 行なら OK)
+SELECT o.order_no, o.total, SUM(l.qty * l.price) AS lines_total
+FROM orders o JOIN order_lines l ON l.order_no = o.order_no
+GROUP BY o.order_no, o.total
+HAVING o.total <> SUM(l.qty * l.price);
+```
+
+**参照だけです。** `query` が実行するのは `SELECT` と `WITH` の文だけです。書き込む可能性のある文(`INSERT`・`UPDATE`・`SELECT ... INTO`・`FOR UPDATE`・`EXEC`・SQL Server のバッチに続けて書いた別の文など)が1つでもあれば1文も実行せず、どの文がなぜだめかをクリップボードに入れます(チャットに貼れば書き直してもらえます)。さらに、読み取り専用トランザクション(PostgreSQL・MySQL・Oracle)、必ずロールバックするトランザクション(SQL Server)、読み取り専用で開いたDB(SQLite)の中で実行します。それでも、接続には SELECT だけを許可したユーザーを使ってください(下記)。
+
+**結果にはデータが入ります。** ashiato はクリップボードに入れるだけですが、チャットに貼るとそのサービスに送られます。対象のDB(本番ではなくテスト用)の値をチャットに貼ってよいか、社内の決まりを確かめてください。ファイルは UTF-8 か Shift_JIS で読みます。文の区切りは `;` か、`GO` または `/` だけの行です。SQL Server のドライバーは decimal を浮動小数点数で返すため、有効数字が15桁を超える列は `varchar` に `CAST` すると全桁を見られます。
 
 ### 大きなテーブル
 
