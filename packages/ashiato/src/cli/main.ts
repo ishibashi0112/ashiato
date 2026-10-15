@@ -9,7 +9,8 @@ import { serveMcp } from "../agent/mcp.js";
 import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
-import { schemaMarkdown } from "../chat/schema.js";
+import { crawlPages, packMarkdown, pageActions, testTitles, type ExistingTests, type PageShot } from "../chat/pack.js";
+import { schemaMarkdown, schemaSections, type SchemaSection } from "../chat/schema.js";
 import { ActionRunner } from "../chat/auto.js";
 import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
 import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport, type AutoRunner, type VerifyRun } from "../chat/verify.js";
@@ -379,6 +380,163 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
   }
 }
 
+interface PackValues extends DeliverValues, BrowserValues {
+  tables?: string;
+  pages?: string;
+  "max-pages"?: string;
+  "max-chars"?: string;
+  sessions?: string;
+  tests?: string;
+  code?: string;
+  "page-text"?: boolean;
+  lang?: string;
+}
+
+/** Saved sessions: the files named, or the newest ones of a folder (default .ashiato/sessions, when there is one). */
+function readSessions(given: string | undefined): Session[] {
+  const paths = list(given) ?? (existsSync(".ashiato/sessions") ? [".ashiato/sessions"] : []);
+  const files: string[] = [];
+  for (const p of paths) {
+    const path = resolve(p);
+    if (!existsSync(path)) throw new Error(`--sessions: ${p} doesn't exist`);
+    if (statSync(path).isDirectory()) {
+      const inFolder = readdirSync(path)
+        .filter((f) => /\.json$/i.test(f) && !/\.tmp$/i.test(f))
+        .sort()
+        .slice(-50)
+        .map((f) => join(path, f));
+      files.push(...inFolder);
+    } else files.push(path);
+  }
+  return files.flatMap((f) => {
+    try {
+      return [loadSession(f)];
+    } catch {
+      // not a session (another JSON file in the folder)
+      return [];
+    }
+  });
+}
+
+/** The titles of Playwright tests (`*.spec.*`) and verifications (`*.verify.md`) in the folders given, or in tests/, e2e/ and checks/. */
+function existingTests(given: string | undefined, lang: Lang): ExistingTests[] {
+  const roots = list(given) ?? ["tests", "e2e", "test", "playwright", "checks"].filter((d) => existsSync(d));
+  const out: ExistingTests[] = [];
+  const walk = (dir: string, depth: number) => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).sort();
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (name === "node_modules" || name.startsWith(".")) continue;
+      const path = join(dir, name);
+      const stat = statSync(path, { throwIfNoEntry: false });
+      if (stat?.isDirectory()) {
+        if (depth < 6) walk(path, depth + 1);
+        continue;
+      }
+      if (/\.verify\.md$/i.test(name)) {
+        const file = parseVerifyFile(decodeText(readFileSync(path)), lang);
+        out.push({ file: shown(path), titles: [file.title || name, ...file.steps.map((s) => s.title)] });
+      } else if (/\.spec\.[cm]?[jt]sx?$/i.test(name)) {
+        const titles = testTitles(readFileSync(path, "utf8"));
+        if (titles.length) out.push({ file: shown(path), titles });
+      }
+    }
+  };
+  for (const root of roots) {
+    const path = resolve(root);
+    if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) walk(path, 0);
+    else if (given) throw new Error(`--tests: ${root} is not a folder`);
+  }
+  return out;
+}
+
+async function runPackCommand(values: PackValues, dbUrl?: string) {
+  const lang = langOption(values.lang);
+  const maxChars = Number(values["max-chars"] ?? PASTE_LIMIT);
+  if (!Number.isInteger(maxChars) || maxChars < 5000) throw new Error("--max-chars takes a number of characters (5000 or more)");
+  const maxPages = Number(values["max-pages"] ?? 20);
+  if (!Number.isInteger(maxPages) || maxPages < 1) throw new Error("--max-pages takes a number of pages");
+  if (values.pages && !values.app) throw new Error("--pages needs --app <url>: the app the pages are paths of");
+  for (const option of ["headed", "cdp", "login", "storage-state", "page-text"] as const) {
+    if (values[option] !== undefined && !values.app) throw new Error(`--${option} needs --app <url> (the pages are read in a browser)`);
+  }
+  if (dbUrl && !dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
+  const sessions = readSessions(values.sessions);
+  if (!values.app && !dbUrl && !sessions.length) throw new Error("Nothing to pack: give --app <url> (the pages), --db <url> (the tables) and / or recordings (.ashiato/sessions)");
+  const info = infoFor(values);
+
+  let pages: PageShot[] = [];
+  if (values.app) {
+    const input = lineReader();
+    let driven: Driven | undefined;
+    try {
+      const options = await browserOptions(values, input.ask);
+      driven = await openBrowser("ashiato pack", options);
+      info(`Reading the pages of ${values.app}${values.pages ? "" : " (following its links)"}:`);
+      pages = await crawlPages(driven.page, { app: values.app, pages: list(values.pages), maxPages, pageText: values["page-text"], log: info });
+    } finally {
+      input.close();
+      await driven?.close().catch(() => undefined);
+    }
+    const redirected = pages.filter((p) => p.redirected);
+    if (redirected.length && redirected.length === pages.length - 1) info(`Note: the pages went to ${redirected[0]!.redirected}: if that is a login page, log in first with --login.`);
+  }
+
+  let tables: SchemaSection[] = [];
+  let dialect: string | undefined;
+  if (dbUrl) {
+    const db = await connect(dbUrl);
+    try {
+      dialect = db.dialect;
+      const read = await schemaSections(db, { tables: list(values.tables), views: false, lang });
+      tables = read.sections;
+      if (read.unreadable.length) info(`Could not read: ${read.unreadable.join(", ")}`);
+    } finally {
+      await db.close();
+    }
+  } else dialect = sessions[0]?.dialect;
+
+  const code = values.code ? { name: basename(values.code), text: decodeText(readFileSync(resolve(values.code))) } : undefined;
+  const actions = pageActions(sessions, lang);
+  const pack = packMarkdown({
+    lang,
+    app: values.app,
+    dialect,
+    pages,
+    pageText: values["page-text"],
+    actions,
+    recordings: sessions.length,
+    tables,
+    tests: existingTests(values.tests, lang),
+    code,
+    maxChars,
+  });
+
+  const out = values.out === "-" ? undefined : resolve(values.out ?? join("docs", "ashiato", "pack.md"));
+  if (out) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, pack.markdown);
+  }
+  info(
+    `${out ? `Wrote ${shown(out)}` : "Packed"}: ${pages.length} page(s), ${actions.length} recorded action(s) from ${sessions.length} recording(s), ${tables.length} table(s); ${pack.markdown.length.toLocaleString("en-US")} characters.`,
+  );
+  if (values["page-text"]) info("Note: --page-text keeps the pages' text, which may show the database's values: check that your company allows pasting them into the chat.");
+  const { pages: leftPages, actions: leftActions, tables: leftTables, tests: leftTests, code: leftCode } = pack.left;
+  if (leftPages.length || leftActions.length || leftTables.length || leftTests || leftCode) {
+    info(`Left out to stay within --max-chars ${maxChars}: ${[leftPages.length && `${leftPages.length} page(s)`, leftActions.length && "recorded actions", leftTables.length && `${leftTables.length} table(s)`, leftTests && "tests", leftCode && "code"].filter(Boolean).join(", ")}.`);
+    if (leftPages.length) info(`Make another pack of the rest and paste it after this one: ashiato pack --app ${values.app} --pages ${leftPages.join(",")}`);
+    else if (leftTables.length) info("Pick the tables with --tables to put the ones that matter in.");
+  }
+  if (values.out === "-") return deliverReport(pack.markdown, "the pack", values, "lower --max-chars");
+  if (values["no-clip"]) return;
+  const clip = writeClipboard(pack.markdown);
+  info(clip.ok ? "Copied it to the clipboard: paste it into the chat." : `Could not copy to the clipboard (${clip.message}): paste the file's text into the chat.`);
+}
+
 /**
  * Lines typed at the terminal, one per question. On a terminal, lines typed before the question
  * (Enter pressed twice) are dropped: they would answer a step the person hasn't read yet.
@@ -572,6 +730,10 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (command === "query") return runQueryCommand(rest, values, dbUrl);
+  if (command === "pack") {
+    if (rest.length) throw new Error(`ashiato pack takes no files (got ${rest.join(" ")}): give --app <url>, --db <url>, --sessions <folder>`);
+    return runPackCommand(values, dbUrl);
+  }
   if (command === "verify") return runVerifyCommand(rest, values, dbUrl);
 
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");

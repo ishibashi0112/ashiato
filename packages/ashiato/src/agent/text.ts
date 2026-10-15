@@ -39,7 +39,7 @@ function actionShape(a: ActionInfo): ActionInfo {
 const requestShape = (r: RequestInfo): RequestInfo => ({ ...r, ...(r.url ? { url: withoutQuery(r.url) } : {}), ...(r.error ? { error: "(message not shown)" } : {}) });
 
 /** The step's label, rebuilt from its action when the label came from the page. */
-function labelShape(step: Step): string {
+export function labelShape(step: Step): string {
   const a = step.action;
   if (!a) return step.label;
   // a request on its own is labelled with its URL (or WebView2 method)

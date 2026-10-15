@@ -9,6 +9,7 @@ import { connect } from "../src/adapters/index.js";
 import type { DbAdapter } from "../src/adapters/types.js";
 import { ActionRunner } from "../src/chat/auto.js";
 import { openBrowser, type Driven } from "../src/chat/browser.js";
+import { crawlPages, packMarkdown } from "../src/chat/pack.js";
 import { runVerify, verifyReport } from "../src/chat/verify.js";
 import { parseVerifyFile } from "../src/chat/verifyFile.js";
 import { createAppDb } from "./helpers.js";
@@ -75,11 +76,12 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
   const app = createAppDb();
   let server: Server;
   let url: string;
+  let visits: string[];
   let db: DbAdapter;
   let driven: Driven;
 
   beforeAll(async () => {
-    ({ server, url } = await startOrdersApp(app.db));
+    ({ server, url, visits } = await startOrdersApp(app.db));
     db = await connect(`sqlite:${app.file}`);
     driven = await openBrowser("verify --auto", { app: url });
   }, 60_000);
@@ -121,5 +123,42 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
     // nothing is named like it: every button and link is listed (not the options of a list box)
     expect(md).toContain('画面にある似た名前:\n- link "ホーム"\n- link "受注一覧"\n- link "新規受注"\n- link "ログアウト"\n- button "登録"\n');
     expect(md).toContain("手順の終わりの画面(アクセシビリティ木):\n\n```yaml\n");
+  }, 60_000);
+
+  it("packs each page's accessibility tree without what may show the database's values", async () => {
+    app.db.exec("INSERT INTO orders (customer_id, qty, updated_at) VALUES (8, 2, 'x'), (7, 4, 'x'), (7, 5, 'x'), (8, 6, 'x')");
+    visits.length = 0;
+    const pages = await crawlPages(driven.page, { app: `${url}/` });
+    expect(pages.map((p) => [p.path, p.title])).toEqual([
+      ["/", "受注管理"],
+      ["/orders", "受注一覧"],
+      ["/orders/new", "新規受注"],
+    ]);
+    // links that may log out (or delete, download) are not followed
+    expect(visits.filter((v) => v.startsWith("GET /logout"))).toEqual([]);
+    const [home, orders, form] = pages.map((p) => p.tree!);
+    expect(home).toContain('- heading "受注管理" [level=1]');
+    expect(home).toContain("- paragraph: …");
+    expect(home).not.toContain("鈴木");
+    expect(form).toContain('- combobox "得意先":\n    - option "…"');
+    expect(form).toContain('- spinbutton "数量"');
+    // named by its placeholder
+    expect(form).toContain('- textbox "備考"');
+    expect(form).toContain('- button "登録"');
+    // column headers are the app's wording; rows are data, and only their buttons keep their names
+    expect(orders).toContain('- columnheader "番号"');
+    expect(orders).toContain('- cell "…"');
+    expect(orders).toContain('- button "取消"');
+    expect(orders).toContain("- text: (+1 rows)");
+    expect(orders).not.toMatch(/鈴木|田中/);
+
+    const withText = await crawlPages(driven.page, { app: url, pages: ["/orders"], pageText: true });
+    expect(withText.map((p) => p.path)).toEqual(["/orders"]);
+    expect(withText[0]!.tree).toContain('- cell "田中物産"');
+
+    const pack = packMarkdown({ lang: "ja", app: url, pages, actions: [], recordings: 0, tables: [], tests: [] });
+    expect(pack.markdown).toContain("## 画面\n\n画面ごとのアクセシビリティ木");
+    expect(pack.markdown).toContain("### /orders/new — 新規受注\n\n```yaml\n- navigation:");
+    expect(pack.markdown).toContain("記録がまだありません。");
   }, 60_000);
 });
