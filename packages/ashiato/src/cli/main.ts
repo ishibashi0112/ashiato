@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -9,9 +9,14 @@ import { serveMcp } from "../agent/mcp.js";
 import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
+import { ignoredColumns, leftOut, makePack, type PackResult } from "../chat/pack.js";
+import { existingTests, filesIn, readSessions } from "../chat/files.js";
 import { schemaMarkdown } from "../chat/schema.js";
-import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport } from "../chat/verify.js";
-import { parseVerifyFile } from "../chat/verifyFile.js";
+import { ActionRunner } from "../chat/auto.js";
+import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
+import { EXPORTED_HEADER, exportTest } from "../chat/exportTests.js";
+import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport, type AutoRunner, type VerifyRun } from "../chat/verify.js";
+import { parseVerifyFile, type FileProblem, type VerifyFile } from "../chat/verifyFile.js";
 import { fileSource, recorderSource } from "../agent/source.js";
 import { stepLine, stepShape, stepText } from "../agent/text.js";
 import { agentTools } from "../agent/tools.js";
@@ -38,7 +43,11 @@ Usage:
   ashiato mcp --db <url> [record options] [--share-values]   (or --recorder <url>)
   ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--out docs/db/schema.md] [--lang ja|en]
   ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
-  ashiato verify <file.verify.md> --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
+  ashiato verify <file.verify.md | folder>... --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
+                 [--auto --app <url> [--login] [--storage-state <file>] [--headed] [--cdp <url>]]
+  ashiato pack [--app <url> [--login] [--storage-state <file>] [--page-text]] [--db <url>] [--pages /a,/b] [--sessions <folder>]
+               [--tests <folder>] [--code <file>] [--out <file>] [--max-chars 100000]
+  ashiato export-tests <file.verify.md | folder>... [--out tests/e2e/] [--app <url>] [--ignore-columns c] [--force]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
@@ -76,7 +85,7 @@ For AI agents and scripts:
   --json                  JSON instead of text
   --no-values             Tables, columns and counts only: no row values
   mcp                     An MCP server (stdio) for AI agents: start_recording, checkpoint, list_steps,
-                          get_step, stop_recording, generate_test, export_evidence, list_tables.
+                          get_step, stop_recording, generate_test, export_evidence, list_tables, pack, verify_auto.
                           With --db it records itself (timeline on --port); with --recorder it reads
                           a running \`ashiato record\`.
   --share-values          mcp: give the AI the rows' values. Without it the AI sees tables, columns and
@@ -102,7 +111,35 @@ For AI chats (no agent: you carry the text between the chat and this machine):
                           verify: tables with more rows than this are not watched (default 100000)
   --no-clip               query / verify: don't copy to the clipboard (without --out, the results are printed)
   --save-session          verify: also save the changes as a session in .ashiato/sessions (for export / show)
-  --lang <ja|en>          schema / query / verify: language of the text around the data (default: the machine's)
+  --lang <ja|en>          schema / query / verify / pack: language of the text around the data (default: the machine's)
+
+End-to-end checks from a chat (the chat writes the steps, ashiato runs them in a browser with Playwright):
+  pack                    Material for the chat in one text: what to write and how, each page's accessibility
+                          tree (read in a browser, following the app's links; text that may show the database's
+                          values is replaced with …), which recorded actions changed which tables (from
+                          .ashiato/sessions), the table definitions and the tests there are already.
+                          Written to docs/ashiato/pack.md and copied to the clipboard.
+  verify --auto           Does the steps' actions (\`操作:\` / \`Actions:\` lines) in a browser and compares what
+                          changed with what each step expects. A step that fails says why, with the names on
+                          the page like the one written and the page's tree. Steps without actions: you do them.
+  export-tests            Each verification as a Playwright test (tests/e2e/<name>.spec.ts, ashiato/playwright)
+  --app <url>             The app's URL (pack: its pages are read; verify / export-tests: paths open from it)
+  --login                 Open the app in a browser to log in first; the login is saved to .ashiato/login.json
+                          and used from then on (it holds cookies: keep it out of version control)
+  --storage-state <file>  A login saved with --login (default .ashiato/login.json, when there is one)
+  --headed                Show the browser
+  --cdp <url>             Use a browser that is already running (a WebView2 app started with
+                          --remote-debugging-port), at http://127.0.0.1:<port>
+  --pages <list>          pack: paths to read instead of following links
+  --max-pages <n>         pack: pages read at most when following links (default 20)
+  --page-text             pack: keep the pages' text (it may show the database's values)
+  --sessions <path>       pack: recordings (a folder or .json files; default .ashiato/sessions)
+  --tests <folder>        pack: where the tests there are already are (default tests, e2e, test, playwright, checks)
+  --code <file>           pack: code to add at the end (e.g. repomix's output), as much as fits
+  --max-chars <n>         pack: at most this many characters (default 100000); the later parts are left out first
+  --out <path>            pack: the file (default docs/ashiato/pack.md; - for the terminal)
+                          export-tests: the folder (default tests/e2e/), or a file for one verification
+  --force                 export-tests: overwrite tests that export-tests didn't write
 
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
@@ -136,18 +173,7 @@ const shown = (path: string) => {
 
 /** The .sql files named (a folder: its .sql files, by name), read as UTF-8 or Shift_JIS. */
 function readSqlFiles(paths: string[]): SqlFile[] {
-  const files: string[] = [];
-  for (const p of paths) {
-    const path = resolve(p);
-    if (statSync(path).isDirectory()) {
-      const inFolder = readdirSync(path)
-        .filter((f) => /\.sql$/i.test(f))
-        .sort()
-        .map((f) => join(path, f));
-      if (!inFolder.length) throw new Error(`No .sql files in ${p}`);
-      files.push(...inFolder);
-    } else files.push(path);
-  }
+  const files = filesIn(paths, /\.sql$/i, ".sql");
   return files.map((f) => {
     try {
       return { name: shown(f), text: decodeText(readFileSync(f)) };
@@ -229,33 +255,78 @@ async function runQueryCommand(paths: string[], values: { db?: string; out?: str
   }
 }
 
-interface VerifyValues extends DeliverValues {
+interface BrowserValues {
+  app?: string;
+  headed?: boolean;
+  browser?: string;
+  cdp?: string;
+  login?: boolean;
+  "storage-state"?: string;
+}
+
+interface VerifyValues extends DeliverValues, BrowserValues {
   tables?: string;
   "ignore-columns"?: string;
   "max-rows"?: string;
   "full-read"?: boolean;
   "save-session"?: boolean;
   lang?: string;
+  auto?: boolean;
+}
+
+/** The browser options of `pack` and `verify --auto`, with the login to use: `--login` saves one first (the person logs in). */
+async function browserOptions(values: BrowserValues, ask: (prompt: string) => Promise<string | null>): Promise<BrowserOptions> {
+  const options: BrowserOptions = { app: values.app, headed: values.headed, browser: values.browser, cdp: values.cdp };
+  if (values.app && !/^https?:\/\//i.test(values.app)) throw new Error(`--app takes the app's URL (http://localhost:5173), not "${values.app}"`);
+  const login = resolve(values["storage-state"] ?? DEFAULT_LOGIN);
+  if (values.login) {
+    if (!values.app) throw new Error("--login needs --app <url>: the page to log in on");
+    if (values.cdp) throw new Error("--login is for a browser ashiato starts: with --cdp, log in in the app itself");
+    console.log(`Opening ${values.app}: log in, then come back here.`);
+    await saveLogin({ ...options, app: values.app, file: login, waitForPerson: () => ask("When you have logged in, press Enter > ") });
+    console.log(`Saved the login to ${shown(login)} (it holds the session's cookies: keep it out of version control).`);
+  }
+  if (values["storage-state"] && !values.login && !existsSync(login)) throw new Error(`${values["storage-state"]} doesn't exist: save a login with --login first`);
+  if (!values.cdp && existsSync(login)) {
+    if (!values.login && !values["storage-state"]) console.log(`Using the login saved in ${shown(login)}.`);
+    options.storageState = login;
+  }
+  return options;
 }
 
 async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: string) {
-  const [path, ...extra] = paths;
-  if (!path || extra.length) throw new Error("Usage: ashiato verify <file.verify.md> --db <url>");
+  if (!paths.length) throw new Error("Usage: ashiato verify <file.verify.md | folder>... --db <url>");
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   if (!dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
   const lang = langOption(values.lang);
   const maxRows = values["max-rows"] === undefined ? undefined : Number(values["max-rows"]);
   if (maxRows !== undefined && (!Number.isInteger(maxRows) || maxRows < 1)) throw new Error("--max-rows takes a number of rows");
-  const fileName = shown(resolve(path));
-  const file = parseVerifyFile(decodeText(readFileSync(resolve(path))), lang);
+  for (const option of ["app", "headed", "cdp", "login", "storage-state"] as const) {
+    if (values[option] !== undefined && !values.auto) throw new Error(`--${option} is for --auto (the steps' actions are done in a browser)`);
+  }
+  const files = filesIn(paths, /\.verify\.md$/i, ".verify.md").map((path) => {
+    const fileName = shown(path);
+    try {
+      return { fileName, file: parseVerifyFile(decodeText(readFileSync(path)), lang) };
+    } catch (e) {
+      throw new Error(`${fileName}: ${(e as Error).message}`);
+    }
+  });
   const deliver = (markdown: string, what: string) => deliverReport(markdown, what, values, "split the steps into several files");
-  if (file.problems.length) {
+  const sendBack = (list: { fileName: string; file: VerifyFile; problems: (FileProblem | string)[] }[], why: string) => {
     // nothing is checked, and what to correct goes back to the chat
-    for (const p of file.problems) console.error(`${fileName}:${p.line}: ${p.message}`);
-    console.error("Nothing was checked: the file needs correcting.");
-    deliver(fileProblemsReport(file, file.problems, { fileName, lang }), "what to correct");
+    for (const { fileName, problems } of list) for (const p of problems) console.error(typeof p === "string" ? `${fileName}: ${p}` : `${fileName}:${p.line}: ${p.message}`);
+    console.error(why);
+    deliver(list.map(({ fileName, file, problems }) => fileProblemsReport(file, problems as FileProblem[], { fileName, lang })).join("\n"), "what to correct");
     process.exitCode = 1;
-    return;
+  };
+  const wrong = files
+    .map((f) => ({ ...f, problems: [...f.file.problems, ...(values.auto ? f.file.actionProblems : [])].sort((a, b) => a.line - b.line) }))
+    .filter((f) => f.problems.length);
+  if (wrong.length) return sendBack(wrong, "Nothing was checked: the file needs correcting.");
+  if (values.auto && !files.some((f) => f.file.steps.some((s) => s.actions))) {
+    const problem = lang === "ja" ? "「操作:」の行がある手順がありません(--auto はその操作を実行します)。" : "No step has actions (`Actions:`): --auto does those.";
+    return sendBack(files.map((f) => ({ ...f, problems: [{ line: 1, message: problem }] })), "Nothing was checked: no step has actions.");
   }
 
   const db = await connect(dbUrl);
@@ -263,50 +334,210 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
   // Ctrl+C ends the steps; the results so far are still copied
   const interrupted = () => input.close();
   process.once("SIGINT", interrupted);
+  let driven: Driven | undefined;
   try {
-    const run = await runVerify(db, file, {
-      lang,
-      tables: list(values.tables),
-      ignoreColumns: list(values["ignore-columns"]),
-      maxRows,
-      incremental: !values["full-read"],
-      ask: input.ask,
-      log: (m) => console.log(m),
-    });
-    if (run.problems) {
-      for (const p of run.problems) console.error(p);
-      console.error("Nothing was checked: the file names tables that aren't watched.");
-      deliver(fileProblemsReport(file, run.problems, { fileName, lang }), "what to correct");
-      process.exitCode = 1;
-      return;
+    let auto: AutoRunner | undefined;
+    if (values.auto) {
+      const options = await browserOptions(values, input.ask);
+      driven = await openBrowser("verify --auto", options);
+      auto = new ActionRunner(driven.page, { lang, app: values.app });
     }
+    const reports: string[] = [];
+    const runs: { fileName: string; run: VerifyRun }[] = [];
+    for (const { fileName, file } of files) {
+      if (files.length > 1) console.log(`\n=== ${fileName}`);
+      const run = await runVerify(db, file, {
+        lang,
+        tables: list(values.tables),
+        ignoreColumns: list(values["ignore-columns"]),
+        maxRows,
+        incremental: !values["full-read"],
+        ask: input.ask,
+        log: (m) => console.log(m),
+        auto,
+      });
+      if (run.problems) {
+        // nothing of this file is checked, and what to correct goes back with the others' results
+        for (const p of run.problems) console.error(`${fileName}: ${p}`);
+        reports.push(fileProblemsReport(file, run.problems, { fileName, lang }));
+        process.exitCode = 1;
+        continue;
+      }
+      runs.push({ fileName, run });
+      reports.push(verifyReport(file, run, { fileName, dialect: db.dialect, lang }));
+      if (run.outcomes.some((o) => o.verdict === "not-run")) break;
+    }
+    const outcomes = runs.flatMap((r) => r.run.outcomes);
     const tally = (["ok", "ng", "unchecked", "skipped", "not-run", "error"] as const)
-      .map((v) => [v, run.outcomes.filter((o) => o.verdict === v).length] as const)
+      .map((v) => [v, outcomes.filter((o) => o.verdict === v).length] as const)
       .filter(([, n]) => n)
       .map(([v, n]) => `${verdictText(v, lang)} ${n}`)
       .join(" / ");
     console.log(`\n${tally}`);
-    deliver(verifyReport(file, run, { fileName, dialect: db.dialect, lang }), `the results of ${run.outcomes.length} step(s)`);
-    if (values["save-session"]) {
+    deliver(reports.join("\n"), `the results of ${outcomes.length} step(s)`);
+    if (values["save-session"] && runs.length) {
       const session: Session = {
         version: 1,
         id: randomUUID(),
-        startedAt: run.startedAt,
+        startedAt: runs[0]!.run.startedAt,
         dialect: db.dialect,
-        tables: run.tables,
+        tables: runs.at(-1)!.run.tables,
         // the checked steps, named with their result (Excel evidence shows the names)
-        steps: run.outcomes.flatMap((o, i) => stepOf(o, i, `[${verdictText(o.verdict, lang)}] ${o.step.title}`) ?? []).map((s, i) => ({ ...s, id: i + 1 })),
+        steps: runs
+          .flatMap(({ fileName, run }) =>
+            run.outcomes.flatMap((o, i) => stepOf(o, i, `[${verdictText(o.verdict, lang)}] ${runs.length > 1 ? `${fileName}: ` : ""}${o.step.title}`) ?? []),
+          )
+          .map((s, i) => ({ ...s, id: i + 1 })),
       };
       const sessionFile = sessionPath(resolve(".ashiato/sessions"), session);
       saveSession(sessionFile, session);
       console.log(`Saved the changes to ${shown(sessionFile)} (Excel evidence: ashiato export ${shown(sessionFile)})`);
     }
-    if (run.outcomes.some((o) => o.verdict === "ng" || o.verdict === "error")) process.exitCode = 1;
+    if (outcomes.some((o) => o.verdict === "ng" || o.verdict === "error")) process.exitCode = 1;
   } finally {
     process.off("SIGINT", interrupted);
     input.close();
+    await driven?.close().catch(() => undefined);
     await db.close();
   }
+}
+
+interface ExportTestsValues {
+  out?: string;
+  app?: string;
+  tables?: string;
+  "ignore-columns"?: string;
+  "storage-state"?: string;
+  force?: boolean;
+  lang?: string;
+}
+
+/** `ashiato export-tests`: each verification as a Playwright test (tests/e2e/<name>.spec.ts). */
+function runExportTestsCommand(paths: string[], values: ExportTestsValues) {
+  if (!paths.length) throw new Error("Usage: ashiato export-tests <file.verify.md | folder>... [--out tests/e2e/] [--app <url>]");
+  const lang = langOption(values.lang);
+  if (values.app && !/^https?:\/\//i.test(values.app)) throw new Error(`--app takes the app's URL (http://localhost:5173), not "${values.app}"`);
+  const files = filesIn(paths, /\.verify\.md$/i, ".verify.md");
+  const toFile = values.out !== undefined && /\.[cm]?[jt]s$/i.test(values.out);
+  if (toFile && files.length > 1) throw new Error(`--out ${values.out} is one file: give a folder for ${files.length} verifications`);
+  const login = values["storage-state"] ?? (existsSync(DEFAULT_LOGIN) ? DEFAULT_LOGIN : undefined);
+  if (values["storage-state"] && !existsSync(values["storage-state"])) throw new Error(`${values["storage-state"]} doesn't exist: save a login with \`ashiato verify --auto --login\` first`);
+
+  let wrong = 0;
+  for (const path of files) {
+    const fileName = shown(path);
+    const file = parseVerifyFile(decodeText(readFileSync(path)), lang);
+    const problems = [...file.problems, ...file.actionProblems].sort((a, b) => a.line - b.line);
+    if (problems.length) {
+      for (const p of problems) console.error(`${fileName}:${p.line}: ${p.message}`);
+      console.error(`${fileName}: not exported (correct it, and check it with ashiato verify --auto)`);
+      wrong++;
+      continue;
+    }
+    if (!file.steps.some((s) => s.actions)) {
+      console.error(`${fileName}: not exported: no step has actions (\`Actions:\` / \`操作:\`), so there is nothing for a test to do`);
+      wrong++;
+      continue;
+    }
+    const out = toFile ? resolve(values.out!) : join(resolve(values.out ?? join("tests", "e2e")), basename(path).replace(/\.verify\.md$/i, ".spec.ts"));
+    if (existsSync(out) && !values.force && !readFileSync(out, "utf8").startsWith(EXPORTED_HEADER)) {
+      console.error(`${shown(out)}: kept: it isn't a file export-tests wrote (changed by hand?). Give --force to overwrite it.`);
+      wrong++;
+      continue;
+    }
+    const test = exportTest(file, {
+      fileName,
+      app: values.app,
+      tables: list(values.tables),
+      ignoreColumns: list(values["ignore-columns"]),
+      storageState: login && shown(resolve(login)),
+    });
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, test.code);
+    console.log(`Wrote ${shown(out)} (${test.automated} step(s)${test.manual.length ? `; ${test.manual.length} step(s) a person does left out as TODO: ${test.manual.join(", ")}` : ""})`);
+  }
+  if (wrong) process.exitCode = 1;
+  else console.log("Run them with: npx playwright test --workers=1 (ASHIATO_DB_URL set to the test database)");
+}
+
+interface PackValues extends DeliverValues, BrowserValues {
+  tables?: string;
+  pages?: string;
+  "max-pages"?: string;
+  "max-chars"?: string;
+  sessions?: string;
+  tests?: string;
+  code?: string;
+  "page-text"?: boolean;
+  lang?: string;
+}
+
+async function runPackCommand(values: PackValues, dbUrl?: string) {
+  const lang = langOption(values.lang);
+  const maxChars = Number(values["max-chars"] ?? PASTE_LIMIT);
+  if (!Number.isInteger(maxChars) || maxChars < 5000) throw new Error("--max-chars takes a number of characters (5000 or more)");
+  const maxPages = Number(values["max-pages"] ?? 20);
+  if (!Number.isInteger(maxPages) || maxPages < 1) throw new Error("--max-pages takes a number of pages");
+  if (values.pages && !values.app) throw new Error("--pages needs --app <url>: the app the pages are paths of");
+  for (const option of ["headed", "cdp", "login", "storage-state", "page-text"] as const) {
+    if (values[option] !== undefined && !values.app) throw new Error(`--${option} needs --app <url> (the pages are read in a browser)`);
+  }
+  if (dbUrl && !dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
+  const sessions = readSessions(list(values.sessions));
+  if (!values.app && !dbUrl && !sessions.length) throw new Error("Nothing to pack: give --app <url> (the pages), --db <url> (the tables) and / or recordings (.ashiato/sessions)");
+  const info = infoFor(values);
+  const tests = existingTests(list(values.tests), lang, shown);
+  const code = values.code ? { name: basename(values.code), text: decodeText(readFileSync(resolve(values.code))) } : undefined;
+
+  const input = lineReader();
+  const db = dbUrl ? await connect(dbUrl) : undefined;
+  let made: PackResult;
+  try {
+    made = await makePack({
+      lang,
+      app: values.app,
+      browser: async () => openBrowser("ashiato pack", await browserOptions(values, input.ask)),
+      pages: list(values.pages),
+      maxPages,
+      pageText: values["page-text"],
+      db,
+      tables: list(values.tables),
+      sessions,
+      tests,
+      code,
+      maxChars,
+      log: info,
+    });
+  } finally {
+    input.close();
+    await db?.close();
+  }
+  const { pack, pages, actions, tables, unreadable } = made;
+  if (unreadable.length) info(`Could not read: ${unreadable.join(", ")}`);
+  const redirected = pages.filter((p) => p.redirected);
+  if (redirected.length && redirected.length === pages.length - 1) info(`Note: the pages went to ${redirected[0]!.redirected}: if that is a login page, log in first with --login.`);
+
+  const out = values.out === "-" ? undefined : resolve(values.out ?? join("docs", "ashiato", "pack.md"));
+  if (out) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, pack.markdown);
+  }
+  info(
+    `${out ? `Wrote ${shown(out)}` : "Packed"}: ${pages.length} page(s), ${actions.length} recorded action(s) from ${sessions.length} recording(s), ${tables.length} table(s); ${pack.markdown.length.toLocaleString("en-US")} characters.`,
+  );
+  const ignored = ignoredColumns(sessions);
+  if (ignored.length) info(`Note: the recordings ignore changes of ${ignored.join(", ")}: run ashiato verify with --ignore-columns ${ignored.join(",")} too.`);
+  if (values["page-text"]) info("Note: --page-text keeps the pages' text, which may show the database's values: check that your company allows pasting them into the chat.");
+  const left = leftOut(pack.left);
+  if (left) {
+    info(`Left out to stay within --max-chars ${maxChars}: ${left}.`);
+    if (pack.left.pages.length) info(`Make another pack of the rest and paste it after this one: ashiato pack --app ${values.app} --pages ${pack.left.pages.join(",")}`);
+    else if (pack.left.tables.length) info("Pick the tables with --tables to put the ones that matter in.");
+  }
+  if (values.out === "-") return deliverReport(pack.markdown, "the pack", values, "lower --max-chars");
+  if (values["no-clip"]) return;
+  const clip = writeClipboard(pack.markdown);
+  info(clip.ok ? "Copied it to the clipboard: paste it into the chat." : `Could not copy to the clipboard (${clip.message}): paste the file's text into the chat.`);
 }
 
 /**
@@ -373,6 +604,20 @@ export async function main(argv: string[]): Promise<void> {
       "no-views": { type: "boolean" },
       "no-clip": { type: "boolean" },
       "save-session": { type: "boolean" },
+      auto: { type: "boolean" },
+      app: { type: "string" },
+      headed: { type: "boolean" },
+      cdp: { type: "string" },
+      login: { type: "boolean" },
+      "storage-state": { type: "string" },
+      pages: { type: "string" },
+      "max-pages": { type: "string" },
+      "max-chars": { type: "string" },
+      sessions: { type: "string" },
+      tests: { type: "string" },
+      code: { type: "string" },
+      "page-text": { type: "boolean" },
+      force: { type: "boolean" },
       version: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -489,7 +734,12 @@ export async function main(argv: string[]): Promise<void> {
   }
 
   if (command === "query") return runQueryCommand(rest, values, dbUrl);
+  if (command === "pack") {
+    if (rest.length) throw new Error(`ashiato pack takes no files (got ${rest.join(" ")}): give --app <url>, --db <url>, --sessions <folder>`);
+    return runPackCommand(values, dbUrl);
+  }
   if (command === "verify") return runVerifyCommand(rest, values, dbUrl);
+  if (command === "export-tests") return runExportTestsCommand(rest, values);
 
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   const db = await connect(dbUrl);

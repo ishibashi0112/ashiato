@@ -8,7 +8,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import { serveMcp, type McpTool } from "../src/agent/mcp.js";
-import { stepLine, stepShape, stepText } from "../src/agent/text.js";
+import { changesLine, problemShape, stepLine, stepShape, stepText } from "../src/agent/text.js";
+import { verifySummary } from "../src/agent/verifyText.js";
+import type { VerifyRun } from "../src/chat/verify.js";
+import { parseExpectedLines } from "../src/chat/verifyFile.js";
+import { matchChanges } from "../src/testing/match.js";
 import { agentTools, type AgentTools } from "../src/agent/tools.js";
 import { main } from "../src/cli/main.js";
 import { startRecording, type Recording } from "../src/cli/recording.js";
@@ -152,6 +156,52 @@ describe("steps as text without values", () => {
     for (const t of [stepText(skipped), JSON.stringify(stepShape(skipped))]) expect(t).not.toContain("A12");
     expect(stepText(skipped)).toContain("not compared: profile (could not be read (the database's message is not shown))\nnot compared: logs (200000 rows (more than max rows 100000))");
     expect(stepText(skipped, { values: true })).toContain("varchar value 'A12'");
+  });
+});
+
+describe("how changes differ, without values", () => {
+  const diff = {
+    from: "",
+    to: "",
+    tables: [
+      { table: { name: "orders" }, key: ["id"], inserted: [{ id: 1042, customer: "Yamada", qty: 2 }, { id: 1043, customer: "Sato", qty: 9 }], updated: [], deleted: [] },
+      { table: { name: "stock" }, key: ["item_id"], inserted: [], deleted: [], updated: [{ key: { item_id: 3 }, before: { item_id: 3, qty: 4711 }, after: { item_id: 3, qty: 4709 }, changed: ["qty"] }] },
+      { table: { name: "audit" }, key: [], inserted: [{ message: "Yamada ordered" }], updated: [], deleted: [] },
+    ],
+  };
+  const watched = diff.tables.map((t) => ({ table: t.table }));
+  const problems = (lines: string[]) => {
+    const r = matchChanges(diff, parseExpectedLines(lines).expect.expected, watched);
+    return r.ok ? [] : r.problems;
+  };
+
+  it("keeps which tables, how many rows and which columns differ, and leaves the rows out", () => {
+    const found = problems(["orders: inserted 1 row (customer=Suzuki, qty=2)", "stock: updated 1 row (item_id=3) → (qty-=3)"]);
+    expect(found.join("\n")).toMatch(/Yamada|4711/);
+    const shaped = found.map(problemShape).join("\n");
+    expect(shaped).not.toMatch(/Yamada|Sato|4711|4709|1042/);
+    expect(shaped).toBe(
+      [
+        "orders: 1 inserted row expected, 2 found",
+        "    expected { customer: Suzuki, qty: 2 }: no row matches",
+        "        customer: expected Suzuki, got another value",
+        "    not expected: (rows not shown)",
+        "stock: 1 updated row found, but not the expected ones",
+        "    expected { where: { item_id: 3 }, set: { qty: a change by -3 } }: no row matches",
+        "        set qty: expected a change by -3, got another value",
+        "audit changed (1 inserted), but the expectation doesn't list it",
+      ].join("\n"),
+    );
+    expect(changesLine(diff)).toBe("orders +2, stock ~1 (qty), audit +1");
+  });
+
+  it("leaves the database's messages out of verify_auto's summary", () => {
+    const error = "Conversion failed when converting the varchar value 'Tanaka Taro' to data type int.";
+    expect(problemShape(`orders can't be compared: it could not be read: ${error}`)).toBe("orders can't be compared: it could not be read (the database's message is not shown)");
+    const run: VerifyRun = { startedAt: "2026-10-15T00:00:00Z", tables: [{ name: "orders" }], notCompared: [{ table: { name: "orders" }, reason: `it could not be read: ${error}` }], outcomes: [] };
+    const summary = verifySummary(run, { fileName: "checks/a.verify.md", lang: "en" });
+    expect(summary).toContain("not compared: orders (it could not be read)");
+    expect(summary).not.toContain("Tanaka");
   });
 });
 

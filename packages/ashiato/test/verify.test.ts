@@ -353,6 +353,21 @@ describe("ashiato verify", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("keeps the results of the files before one that names a table the database doesn't have", async () => {
+    capture();
+    const app = createAppDb();
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-verify-"));
+    writeFileSync(join(dir, "a.verify.md"), "# 開く\n\n## 1. 一覧を開く\n\n期待する DB の変化:\n- 変化なし\n");
+    writeFileSync(join(dir, "b.verify.md"), "# 違う表\n\n## 1. 登録\n\n期待する DB の変化:\n- order: 追加 1 行\n");
+    vi.spyOn(process, "stdin", "get").mockReturnValue(Readable.from(["見た\n"]) as unknown as typeof process.stdin);
+    const out = join(dir, "result.md");
+    await main(["verify", dir, "--db", `sqlite:${app.file}`, "--lang", "ja", "--no-clip", "--out", out]);
+    const md = readFileSync(out, "utf8");
+    expect(md).toContain("| 1. 一覧を開く | OK | 見た |");
+    expect(md).toContain('"order" is not a watched table');
+    expect(process.exitCode).toBe(1);
+  });
+
   it("sends back what to correct, and checks nothing, when the file has problems", async () => {
     capture();
     const app = createAppDb();

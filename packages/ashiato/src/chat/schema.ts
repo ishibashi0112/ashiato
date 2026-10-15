@@ -14,6 +14,7 @@ const TEXT = {
     key: (cols: string[]) => `Primary key: ${cols.length ? cols.join(", ") : "(none)"}`,
     header: (comments: boolean) => `| Column | Type | Null |${comments ? " Comment |" : ""}`,
     unreadable: (why: string) => `Could not be read: ${why}`,
+    notShown: "(the database's message is not shown)",
     none: "(none)",
   },
   ja: {
@@ -25,6 +26,7 @@ const TEXT = {
     key: (cols: string[]) => `主キー:${cols.length ? cols.join(", ") : "(なし)"}`,
     header: (comments: boolean) => `| 列 | 型 | Null |${comments ? " コメント |" : ""}`,
     unreadable: (why: string) => `読み取れませんでした:${why}`,
+    notShown: "(DB のメッセージは表示しません)",
     none: "(なし)",
   },
 };
@@ -41,11 +43,19 @@ export function pickTables<T extends TableRef>(all: T[], patterns?: string[]): T
   return all.filter((t) => tests.some(({ re }) => hit(t, re)));
 }
 
-/** The tables' and views' definitions as Markdown, for an AI in a chat that writes SQL against them. */
-export async function schemaMarkdown(
+/** One table's or view's definition: a `### ` heading, its primary key and its columns. */
+export interface SchemaSection {
+  table: TableRef;
+  isTable: boolean;
+  lines: string[];
+}
+
+/** The definitions of the tables and views picked, each as its own Markdown section, tables first. */
+export async function schemaSections(
   db: DbAdapter,
-  options: { tables?: string[]; views?: boolean; lang: Lang },
-): Promise<{ markdown: string; tables: number; views: number; unreadable: string[] }> {
+  /** `errors: false`: a table that can't be read doesn't say why (the database's message may hold values). */
+  options: { tables?: string[]; views?: boolean; lang: Lang; errors?: boolean },
+): Promise<{ sections: SchemaSection[]; unreadable: string[] }> {
   if (!db.describeTable) throw new Error(`ashiato schema can't read table definitions on ${db.dialect}`);
   const t = TEXT[options.lang];
   const byId = (a: TableRef, b: TableRef) => tableId(a).localeCompare(tableId(b));
@@ -57,7 +67,7 @@ export async function schemaMarkdown(
   const views = picked.filter((x) => allViews.includes(x)).sort(byId);
   const unreadable: string[] = [];
 
-  const section = async (ref: TableRef, isTable: boolean) => {
+  const section = async (ref: TableRef, isTable: boolean): Promise<SchemaSection> => {
     let info: TableInfo;
     let key: string[] = [];
     try {
@@ -65,7 +75,8 @@ export async function schemaMarkdown(
       if (isTable) key = await db.primaryKey(ref);
     } catch (e) {
       unreadable.push(tableId(ref));
-      return [`### ${tableId(ref)}`, "", t.unreadable(e instanceof Error ? e.message : String(e))];
+      const why = options.errors === false ? t.notShown : e instanceof Error ? e.message : String(e);
+      return { table: ref, isTable, lines: [`### ${tableId(ref)}`, "", t.unreadable(why)] };
     }
     const comments = info.columns.some((c) => c.comment);
     const lines = [`### ${tableId(ref)}${info.comment ? ` — ${markdownCell(info.comment)}` : ""}`, ""];
@@ -76,15 +87,30 @@ export async function schemaMarkdown(
       if (comments) cells.push(c.comment ? markdownCell(c.comment) : "");
       lines.push(`| ${cells.join(" | ")} |`);
     }
-    return lines;
+    return { table: ref, isTable, lines };
   };
 
+  const sections: SchemaSection[] = [];
+  for (const ref of tables) sections.push(await section(ref, true));
+  for (const ref of views) sections.push(await section(ref, false));
+  return { sections, unreadable };
+}
+
+/** The tables' and views' definitions as Markdown, for an AI in a chat that writes SQL against them. */
+export async function schemaMarkdown(
+  db: DbAdapter,
+  options: { tables?: string[]; views?: boolean; lang: Lang },
+): Promise<{ markdown: string; tables: number; views: number; unreadable: string[] }> {
+  const t = TEXT[options.lang];
+  const { sections, unreadable } = await schemaSections(db, options);
+  const tables = sections.filter((s) => s.isTable);
+  const views = sections.filter((s) => !s.isTable);
   const out = [t.title, "", t.intro(DIALECT_NAMES[db.dialect] ?? db.dialect), "", t.tables];
   if (!tables.length) out.push("", t.none);
-  for (const ref of tables) out.push("", ...(await section(ref, true)));
+  for (const s of tables) out.push("", ...s.lines);
   if (views.length) {
     out.push("", t.views);
-    for (const ref of views) out.push("", ...(await section(ref, false)));
+    for (const s of views) out.push("", ...s.lines);
   }
   return { markdown: `${out.join("\n")}\n`, tables: tables.length, views: views.length, unreadable };
 }

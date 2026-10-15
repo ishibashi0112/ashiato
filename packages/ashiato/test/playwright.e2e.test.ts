@@ -10,7 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { exportTest } from "../src/chat/exportTests.js";
+import { parseVerifyFile } from "../src/chat/verifyFile.js";
 import { createAppDb } from "./helpers.js";
+import { startOrdersApp } from "./fixtures/ordersApp.js";
 
 const pkg = fileURLToPath(new URL("..", import.meta.url));
 const fixtures = join(pkg, "dist/playwright.cjs");
@@ -36,12 +39,12 @@ interface JsonReport {
 }
 
 /** Runs the Playwright test runner on one spec file, with the JSON reporter. */
-function runPlaywright(dir: string): Promise<JsonReport> {
+function runPlaywright(dir: string, env: Record<string, string> = {}): Promise<JsonReport> {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
       [cli, "test", "--config", join(dir, "playwright.config.cjs"), "--reporter=json"],
-      { cwd: dir, env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: join(dir, "report.json"), ASHIATO_DB_URL: "" }, timeout: 90_000 },
+      { cwd: dir, env: { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: join(dir, "report.json"), ASHIATO_DB_URL: "", ...env }, timeout: 90_000 },
       (error, _stdout, stderr) => {
         if (!existsSync(join(dir, "report.json"))) return reject(new Error(`playwright test failed to run: ${error?.message}\n${stderr}`));
         resolve(JSON.parse(readFileSync(join(dir, "report.json"), "utf8")) as JsonReport);
@@ -116,5 +119,90 @@ test("wrong expectation", async ({ page, expectDbChanges }) => {
     // boxed step: the error points at the test's own expectDbChanges call
     expect(failed.errors[0]?.location?.line).toBe(17);
     expect(JSON.stringify(failed.steps ?? [])).toContain("expect database changes: orders +1");
+  }, 120_000);
+});
+
+describe.skipIf(!canRun)("tests exported from verifications (ashiato export-tests)", () => {
+  const app = createAppDb();
+  let server: Server;
+  let url: string;
+  beforeAll(async () => {
+    ({ server, url } = await startOrdersApp(app.db));
+  });
+  afterAll(() => new Promise((r) => server.close(r)));
+
+  const ORDER = `# 受注の登録と取消
+
+## 1. 受注を登録する
+
+操作:
+- 開く: /orders/new
+- 選ぶ: 得意先 = 鈴木商事
+- 入力: 数量 = 10
+- 押す: 登録
+- 確認: 「登録しました」が表示される
+
+期待する DB の変化:
+- orders: 追加 1 行 (customer_id=7, qty=10)
+- stock: 更新 1 行 (item_id=3) → (qty-=10)
+
+## 2. 夜間バッチ
+
+人がバッチを流す。
+
+## 3. 取消をやめる
+
+操作:
+- 開く: /orders
+- ダイアログ: キャンセル
+- 押す: 取消 (「鈴木商事」の行)
+
+期待する DB の変化:
+- 変化なし
+
+## 4. 取り消す
+
+操作:
+- 押す: 取消 (最後の行)
+- 確認: 「取り消しました」が表示される
+
+期待する DB の変化:
+- orders: 削除 1 行 (customer_id=7)
+- stock: 更新 1 行 (item_id=3) → (qty+=10)
+`;
+
+  const WRONG = `# 間違い
+
+## 1. 数量を間違える
+
+操作:
+- 開く: /orders/new
+- 入力: 数量 = 2
+- 押す: 登録
+
+期待する DB の変化:
+- orders: 追加 1 行 (qty=3)
+`;
+
+  it("does the steps and checks the changes in the Playwright test runner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ashiato-export-"));
+    writeFileSync(join(dir, "playwright.config.cjs"), `module.exports = { testDir: ".", workers: 1, use: { launchOptions: { executablePath: ${JSON.stringify(browserPath)} } } };`);
+    for (const [name, text] of [["order", ORDER], ["wrong", WRONG]] as const) {
+      const file = parseVerifyFile(text, "ja");
+      expect([...file.problems, ...file.actionProblems]).toEqual([]);
+      const { code } = exportTest(file, { fileName: `checks/${name}.verify.md`, app: url, ignoreColumns: ["updated_at"] });
+      writeFileSync(join(dir, `${name}.spec.ts`), code.replace('from "ashiato/playwright"', `from ${JSON.stringify(fixtures)}`));
+    }
+    const report = await runPlaywright(dir, { ASHIATO_DB_URL: `sqlite:${app.file}` });
+    const specs = report.suites.flatMap((s) => s.specs);
+    const result = (title: string) => specs.find((s) => s.title === title)!.tests[0]!.results[0]!;
+    const order = result("受注の登録と取消");
+    expect(order.errors.map((e) => e.message)).toEqual([]);
+    expect(order.status).toBe("passed");
+    expect(order.steps?.map((s) => s.title)).toEqual(["1. 受注を登録する", "3. 取消をやめる", "4. 取り消す"]);
+    const wrong = result("間違い");
+    expect(wrong.status).toBe("failed");
+    expect(wrong.errors[0]?.message).toContain("qty: expected 3, got 2");
+    expect(app.db.prepare("SELECT COUNT(*) AS n FROM orders").get()).toEqual({ n: 1 });
   }, 120_000);
 });

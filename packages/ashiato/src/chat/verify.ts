@@ -6,6 +6,8 @@ import type { Diff, Row, Snapshot, Step, TableDiff, TableRef } from "../core/typ
 import { localTime, zoneOf, type Lang } from "../export/text.js";
 import { matchChanges, tableProblems } from "../testing/match.js";
 import { watchedIn } from "../testing/watch.js";
+import type { StepAction } from "./actions.js";
+import { dialogText, type ActionRun, type Screen } from "./auto.js";
 import { codeFence, DIALECT_NAMES, markdownCell } from "./markdown.js";
 import type { FileProblem, StepExpectation, VerifyFile, VerifyStep } from "./verifyFile.js";
 
@@ -27,6 +29,8 @@ export interface StepOutcome {
   ms?: number;
   /** The database's error (the step and the ones after it were not checked). */
   error?: string;
+  /** `--auto`: what happened to the step's actions. */
+  actions?: ActionRun & { screen?: Screen };
 }
 
 export interface VerifyRun {
@@ -53,11 +57,23 @@ export interface VerifyOptions extends ReaderOptions {
   log(text: string): void;
   /** The step was checked (or skipped). */
   onStep?(outcome: StepOutcome, index: number): void;
+  /** `--auto`: carries out the steps that have actions (the others are left to the person). */
+  auto?: AutoRunner;
+}
+
+/** Carries out a step's actions (`verify --auto`, with Playwright). */
+export interface AutoRunner {
+  run(actions: StepAction[]): Promise<ActionRun>;
+  /** The page's accessibility tree now, for the report of a step that failed. */
+  screen(): Promise<Screen | undefined>;
 }
 
 const TEXT = {
   en: {
     ready: (n: number, ms: number) => `Watching ${n} table(s) (read in ${ms} ms).`,
+    running: "Doing the actions…",
+    actionFailed: (line: string, message: string) => `✗ ${line}: ${message}`,
+    byPerson: "(This step has no actions: you do it.)",
     notCompared: (n: number) => `${n} table(s) can't be compared (too large or unreadable): their changes are not checked.`,
     step: (i: number, n: number, title: string) => `── Step ${i}/${n}: ${title}`,
     expected: "Expected changes:",
@@ -72,6 +88,9 @@ const TEXT = {
   },
   ja: {
     ready: (n: number, ms: number) => `${n} 個の表を見張ります(${ms} ms で読み取り)。`,
+    running: "操作しています…",
+    actionFailed: (line: string, message: string) => `✗ ${line}: ${message}`,
+    byPerson: "(操作が書かれていない手順です。人が操作してください)",
     notCompared: (n: number) => `${n} 個の表は比べられません(大きすぎるか読めない)。その変化は照合しません。`,
     step: (i: number, n: number, title: string) => `── 手順 ${i}/${n}: ${title}`,
     expected: "期待する DB の変化:",
@@ -97,7 +116,8 @@ const AGAIN = /^(?:r|retry|再照合|もう一度)$/i;
  */
 export async function runVerify(db: DbAdapter, file: VerifyFile, options: VerifyOptions): Promise<VerifyRun> {
   const t = TEXT[options.lang];
-  const o = { timeout: 3000, settleMs: 300, pollMs: 100, ...options };
+  // a person presses Enter once the screen shows the result; actions done by Playwright end with the click
+  const o = { timeout: options.auto ? 5000 : 3000, settleMs: 300, pollMs: 100, ...options };
   const startedAt = new Date().toISOString();
   const reader = new TableReader(db, options);
   const started = performance.now();
@@ -136,6 +156,44 @@ export async function runVerify(db: DbAdapter, file: VerifyFile, options: Verify
     o.log(`\n${t.step(i + 1, file.steps.length, step.title)}`);
     if (step.body) o.log(step.body);
     o.log(step.expect ? `\n${t.expected}\n${step.expect.lines.map((l) => `  - ${l}`).join("\n")}` : `\n${t.noCheck}`);
+
+    if (o.auto && step.actions) {
+      o.log(t.running);
+      const checkStarted = performance.now();
+      let outcome: StepOutcome;
+      try {
+        const actions: StepOutcome["actions"] = await o.auto.run(step.actions);
+        if (actions.failed) o.log(t.actionFailed(actions.failed.action.written, actions.failed.message));
+        // after a failed action, what changed is shown, not compared
+        const result = await check(reader, baseline, actions.failed ? undefined : step.expect, o);
+        last = result.snapshot;
+        const verdict: Verdict = actions.failed || result.problems ? "ng" : step.expect ? "ok" : "unchecked";
+        if (verdict === "ng" && !actions.failed) {
+          const screen = await o.auto.screen();
+          if (screen) actions.screen = screen;
+        } else if (actions.failed?.screen) actions.screen = actions.failed.screen;
+        outcome = {
+          step,
+          verdict,
+          diff: result.diff,
+          ...(result.problems ? { problems: result.problems } : {}),
+          checks: 1,
+          at: result.snapshot.takenAt,
+          ms: Math.round(performance.now() - checkStarted),
+          actions,
+        };
+      } catch (e) {
+        outcome = { step, verdict: "error", error: (e as Error).message };
+        quit = true;
+      }
+      if (outcome.diff) o.log(formatStep(stepOf(outcome, i)!, 5, false));
+      if (outcome.verdict === "ok") o.log(t.ok);
+      else if (outcome.verdict === "unchecked") o.log(t.unchecked);
+      else if (outcome.problems) o.log(`${t.ng}\n${outcome.problems.map((p) => indent(p, 2)).join("\n")}`);
+      done(outcome);
+      continue;
+    }
+    if (o.auto) o.log(t.byPerson);
 
     const answer = await o.ask(t.prompt);
     if (answer === null || QUIT.test(answer.trim())) {
@@ -244,6 +302,15 @@ const REPORT = {
     title: (name: string) => `# Verification results: ${name}`,
     intro: (file: string, db: string, at: string, tables: number) =>
       `A person carried out the steps of \`${file}\`, and \`ashiato verify\` compared what changed in ${db} with what they expect (${at}). Tables watched: ${tables}.`,
+    introAuto: (file: string, db: string, at: string, tables: number) =>
+      `\`ashiato verify --auto\` did the actions of the steps of \`${file}\` in a browser with Playwright (a person did the steps without actions) and compared what changed in ${db} with what they expect (${at}). Tables watched: ${tables}.`,
+    auto: "done by Playwright",
+    actions: "Actions:",
+    notDone: "not done",
+    failed: (message: string) => `**The action failed**: ${message}`,
+    candidates: "On the page with a similar name:",
+    dialogs: "Dialogs answered:",
+    screen: "The page (accessibility tree) at the end of the step:",
     notCompared: (list: string) => `Not compared (too large or unreadable): ${list}.`,
     tally: (counts: string) => `Result: ${counts}`,
     head: ["Step", "Result", "Note"],
@@ -268,6 +335,15 @@ const REPORT = {
     title: (name: string) => `# 動作検証の結果: ${name}`,
     intro: (file: string, db: string, at: string, tables: number) =>
       `\`${file}\` の手順を人が操作し、${db} の変化を \`ashiato verify\` が期待と照合した結果です(${at})。見張った表: ${tables} 個。`,
+    introAuto: (file: string, db: string, at: string, tables: number) =>
+      `\`${file}\` の手順の操作を \`ashiato verify --auto\` がブラウザで(Playwright で)実行し(操作のない手順は人が操作し)、${db} の変化を期待と照合した結果です(${at})。見張った表: ${tables} 個。`,
+    auto: "自動",
+    actions: "操作:",
+    notDone: "未実施",
+    failed: (message: string) => `**操作が失敗しました**: ${message}`,
+    candidates: "画面にある似た名前:",
+    dialogs: "答えたダイアログ:",
+    screen: "手順の終わりの画面(アクセシビリティ木):",
     notCompared: (list: string) => `比べられなかった表(大きすぎるか読めない): ${list}`,
     tally: (counts: string) => `結果: ${counts}`,
     head: ["手順", "判定", "メモ"],
@@ -307,10 +383,11 @@ export function verifyReport(file: VerifyFile, run: VerifyRun, options: ReportOp
   const t = REPORT[options.lang];
   const maxRows = options.maxRows ?? 20;
   const at = new Date(run.startedAt);
+  const auto = run.outcomes.some((o) => o.actions);
   const out = [
     t.title(file.title || options.fileName),
     "",
-    t.intro(options.fileName, DIALECT_NAMES[options.dialect] ?? options.dialect, `${localTime(run.startedAt)} ${zoneOf(at)}`, run.tables.length),
+    (auto ? t.introAuto : t.intro)(options.fileName, DIALECT_NAMES[options.dialect] ?? options.dialect, `${localTime(run.startedAt)} ${zoneOf(at)}`, run.tables.length),
   ];
   if (run.notCompared.length) {
     const names = run.notCompared.map((n) => tableId(n.table));
@@ -321,16 +398,33 @@ export function verifyReport(file: VerifyFile, run: VerifyRun, options: ReportOp
     .filter(([, n]) => n > 0)
     .map(([v, n]) => `${t.verdict[v]} ${n}`);
   out.push("", t.tally(counts.join(" / ")), "", `| ${t.head.join(" | ")} |`, "| --- | --- | --- |");
-  for (const o of run.outcomes) out.push(`| ${markdownCell(o.step.title)} | ${t.verdict[o.verdict]} | ${o.memo ? markdownCell(o.memo) : ""} |`);
+  for (const o of run.outcomes) {
+    const note = o.actions ? [t.auto, o.actions.failed?.message].filter(Boolean).join(": ") : o.memo;
+    out.push(`| ${markdownCell(o.step.title)} | ${t.verdict[o.verdict]} | ${note ? markdownCell(note) : ""} |`);
+  }
 
   for (const o of run.outcomes) {
     out.push("", `## ${o.step.title} — ${t.verdict[o.verdict]}`, "");
     if (o.memo) out.push(t.memo(o.memo), "");
+    if (o.actions && o.step.actions) {
+      const failedAt = o.actions.failed ? o.step.actions.indexOf(o.actions.failed.action) : -1;
+      out.push(
+        t.actions,
+        ...o.step.actions.map((a, i) => `- ${i < o.actions!.done ? "✓" : i === failedAt ? "✗" : `(${t.notDone})`} ${a.written}`),
+        "",
+      );
+      if (o.actions.failed) {
+        out.push(t.failed(o.actions.failed.message), "");
+        if (o.actions.failed.candidates?.length) out.push(t.candidates, ...o.actions.failed.candidates.map((c) => `- ${c}`), "");
+      }
+      if (o.actions.dialogs.length) out.push(t.dialogs, ...o.actions.dialogs.map((d) => `- ${dialogText(d, options.lang)}`), "");
+    }
     if (o.step.expect) out.push(t.expected, ...o.step.expect.lines.map((l) => `- ${l}`), "");
     else out.push(t.noCheck, "");
     if (o.error !== undefined) out.push(t.error(o.error), "");
     if (o.problems) out.push(t.differences(o.checks ?? 1), "", codeFence(o.problems.join("\n"), "text"), "");
     if (o.diff) out.push(t.actual, "", ...changes(o.diff, t, maxRows));
+    if (o.actions?.screen) out.push(t.screen, "", codeFence(o.actions.screen.text, "yaml"), "");
   }
   // sections end with a blank line and start with one
   return `${out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;
