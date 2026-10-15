@@ -267,7 +267,7 @@ npx ashiato export-tests checks/ --out tests/e2e/                # Playwright te
 **`pack`** puts what the chat needs in one text (up to `--max-chars`, 100,000 by default; the later parts are left out first):
 
 1. What to write and how: one use case per file, actions only from names on the pages, a `SELECT` to find the values a step needs (you run it with `query` and paste the results), questions instead of guesses.
-2. Each page's accessibility tree, read in a browser following the app's links (`--pages /orders,/orders/new` names them, `--max-pages` caps them). Buttons' and fields' names are the app's wording; **text that may show the database's values is replaced with `…`**: cells, options, fields' values, links to records, and the headings of pages of one record (`/orders/:id`). Long tables keep their first rows and last two. `--page-text` keeps the text, for a test database you may paste. Links that look like logging out, deleting or downloading are not followed.
+2. Each page's accessibility tree, read in a browser following the app's links (`--pages /orders,/orders/new` names them, `--max-pages` caps them). Buttons' and fields' names are the app's wording; **text that may show the database's values is replaced with `…`**: cells, options, fields' values, cards and description lists, links to records (`/customers/C001`, `?id=12`) and to e-mail addresses or phone numbers, and the headings of pages of one record. Long tables keep their first rows and last two. `--page-text` keeps the text, for a test database you may paste. Links that look like logging out, deleting or downloading are not followed.
 3. Which recorded actions changed which tables (`.ashiato/sessions`, from `ashiato record` with the Vite plugin): per page, the action, its requests and counts with the changed columns (`orders +1, stock ~1 (qty↓)`), no values. If the recordings ignored columns (`--ignore-columns`), it says so, so that the chat leaves them out too: run `verify` with the same option.
 4. The table definitions (as `schema`), the tests there are already (titles of `*.spec.ts` / `*.verify.md`), and `--code repomix-output.xml` at the end if you like.
 
@@ -632,7 +632,7 @@ npx ashiato export-tests checks/ --out tests/e2e/                # expectDbChang
 **`pack`** は、チャットに要るものを 1 つのテキストにまとめます(`--max-chars` まで。既定 10 万文字。後ろの部分から削ります)。
 
 1. 何をどう書くか:1 ユースケース 1 ファイル、操作は画面にある名前だけで書く、手順に要る値は探す `SELECT` を書く(人が `query` で実行して貼る)、分からないことは推測せず質問にする
-2. 各画面のアクセシビリティ木:ブラウザでアプリのリンクをたどって読みます(`--pages /orders,/orders/new` で指定、`--max-pages` で上限)。ボタンや入力欄の名前はアプリの文言なのでそのまま入れ、**DB の値が出ている可能性のある文字は `…` に置き換えます**(セル、選択肢、入力欄の値、1 件のデータへのリンク、`/orders/:id` のような 1 件の画面の見出し)。長い表は先頭の数行と最後の 2 行を残します。貼ってよいテスト用 DB なら `--page-text` で文字を残せます。ログアウト・削除・ダウンロードらしいリンクはたどりません
+2. 各画面のアクセシビリティ木:ブラウザでアプリのリンクをたどって読みます(`--pages /orders,/orders/new` で指定、`--max-pages` で上限)。ボタンや入力欄の名前はアプリの文言なのでそのまま入れ、**DB の値が出ている可能性のある文字は `…` に置き換えます**(セル、選択肢、入力欄の値、カードや説明リストの中、1 件のデータへのリンク(`/customers/C001`、`?id=12`)やメール・電話のリンク、1 件の画面の見出し)。長い表は先頭の数行と最後の 2 行を残します。貼ってよいテスト用 DB なら `--page-text` で文字を残せます。ログアウト・削除・ダウンロードらしいリンクはたどりません
 3. 記録した操作でどの表が変わったか(`.ashiato/sessions`。Vite プラグインと `ashiato record` で記録したもの):画面ごとに、操作・通信・件数と変わった列(`orders +1, stock ~1 (qty↓)`)。値は入れません。記録が列を外していた(`--ignore-columns`)ときはそのことも書くので、`verify` も同じオプションで実行してください
 4. テーブル定義(`schema` と同じ)、今あるテスト(`*.spec.ts` / `*.verify.md` のタイトル)、任意で最後に `--code repomix-output.xml`
 

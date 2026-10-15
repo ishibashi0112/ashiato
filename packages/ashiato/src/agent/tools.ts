@@ -16,7 +16,7 @@ import { EXPORT_FORMATS, type ExportFormat } from "../export/index.js";
 import { langOf, type Lang } from "../export/text.js";
 import type { McpTool } from "./mcp.js";
 import { fileSource, recorderSource, recordingSource, type SessionSource } from "./source.js";
-import { stepLine, stepText } from "./text.js";
+import { problemShape, stepLine, stepText } from "./text.js";
 import { verifySummary } from "./verifyText.js";
 
 export interface AgentOptions extends Omit<RecordingOptions, "onStep"> {
@@ -272,6 +272,7 @@ export function agentTools(options: AgentOptions): AgentTools {
             sessions,
             tests: existingTests(given(args.tests) ? [String(args.tests)] : undefined, lang, display, "tests"),
             maxChars: typeof args.max_chars === "number" ? args.max_chars : undefined,
+            dbErrors: values,
             log,
           });
           const out = given(args.out);
@@ -346,7 +347,8 @@ export function agentTools(options: AgentOptions): AgentTools {
               auto,
             });
             if (run.problems) {
-              summaries.push(`${fileName}: nothing checked:\n${run.problems.map((p) => `  ${p}`).join("\n")}`);
+              // a table that can't be read says why in the database's words
+              summaries.push(`${fileName}: nothing checked:\n${run.problems.map((p) => `  ${values ? p : problemShape(p)}`).join("\n")}`);
               continue;
             }
             reports.push(verifyReport(file, run, { fileName, dialect: db.dialect, lang }));

@@ -4,7 +4,7 @@ import { changesLine, labelShape } from "../agent/text.js";
 import { tableId } from "../core/diff.js";
 import type { Session, TableRef } from "../core/types.js";
 import { localTime, zoneOf, type Lang } from "../export/text.js";
-import { formatAria, HIDDEN, isIdSegment, parseAria, shapeAria } from "./aria.js";
+import { formatAria, HIDDEN, isIdSegment, parseAria, shapeAria, toRecord, urlShape } from "./aria.js";
 import { codeFence, DIALECT_NAMES } from "./markdown.js";
 import { schemaSections, type SchemaSection } from "./schema.js";
 
@@ -82,7 +82,9 @@ export async function crawlPages(page: Page, options: CrawlOptions): Promise<Pag
       const response = await page.goto(url, { waitUntil: "load", timeout: 30_000 });
       status = response?.status();
     } catch (e) {
-      shots.push({ path, error: (e as Error).message.split("\n")[0] });
+      // Playwright names the URL, with its query: shaped like the paths
+      const error = (e as Error).message.split("\n")[0]!;
+      shots.push({ path, error: options.pageText ? error : error.replace(/\bhttps?:\/\/\S+/g, (u) => urlShape(u)) });
       continue;
     }
     const yaml = await settledTree(page);
@@ -95,8 +97,8 @@ export async function crawlPages(page: Page, options: CrawlOptions): Promise<Pag
       }
       seen.add(landed);
     }
-    // a page of one record (/orders/:id) may name it in its title and headings
-    const record = !options.pageText && /(?:^|\/):id(?:\/|$)/.test(landed);
+    // a page of one record (/orders/:id, /orders/detail?id=1042) may name it in its title and headings
+    const record = !options.pageText && toRecord(page.url());
     const tree = formatAria(shapeAria(parseAria(yaml), { text: options.pageText, record }));
     const title = (await page.title().catch(() => "")) || undefined;
     shots.push({
@@ -398,6 +400,8 @@ export interface PackInput {
   tests: ExistingTests[];
   code?: { name: string; text: string };
   maxChars?: number;
+  /** false: a table whose definition can't be read doesn't say why (the MCP tool without --share-values). */
+  dbErrors?: boolean;
   log?: (message: string) => void;
 }
 
@@ -425,7 +429,7 @@ export async function makePack(input: PackInput): Promise<PackResult> {
   }
   let tables: SchemaSection[] = [];
   let unreadable: string[] = [];
-  if (input.db) ({ sections: tables, unreadable } = await schemaSections(input.db, { tables: input.tables, views: false, lang: input.lang }));
+  if (input.db) ({ sections: tables, unreadable } = await schemaSections(input.db, { tables: input.tables, views: false, lang: input.lang, errors: input.dbErrors }));
   const actions = pageActions(input.sessions, input.lang);
   const pack = packMarkdown({
     lang: input.lang,

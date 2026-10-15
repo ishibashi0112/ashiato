@@ -25,7 +25,8 @@ export function verifySummary(run: VerifyRun, options: { fileName: string; lang:
     .map(([v, n]) => `${verdictText(v, lang)} ${n}`);
   const out = [`${options.fileName}: ${counts.join(", ") || "no steps checked"}`];
   if (run.notCompared.length) {
-    const reason = (r: string) => (r.startsWith("could not be read") ? "could not be read" : r);
+    // `it could not be read: <the database's message>`: the message may hold values
+    const reason = (r: string) => r.replace(/could not be read: .*$/s, "could not be read");
     out.push(`not compared: ${run.notCompared.map((n) => `${tableId(n.table)} (${reason(n.reason)})`).join(", ")}`);
   }
   for (const o of run.outcomes) {

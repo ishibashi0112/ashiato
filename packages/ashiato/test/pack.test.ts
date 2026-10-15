@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { packMarkdown, pageActions, pagePath, testTitles, type PackParts } from "../src/chat/pack.js";
 import { main } from "../src/cli/main.js";
+import { schemaSections } from "../src/chat/schema.js";
+import type { DbAdapter } from "../src/adapters/types.js";
 import type { Session } from "../src/core/types.js";
 import { createAppDb } from "./helpers.js";
 import { sampleSession } from "./fixtures/session.js";
@@ -146,6 +148,24 @@ describe("packMarkdown", () => {
     expect(markdown).toContain("## お願いしたいこと");
     // with the pages' text kept, nothing says it was hidden
     expect(markdown).not.toContain("「…」に置き換えています");
+  });
+});
+
+describe("table definitions in a pack", () => {
+  it("doesn't say why a table can't be read when told not to (the MCP tool without --share-values)", async () => {
+    const db = {
+      dialect: "sqlite",
+      listTables: async () => [{ name: "orders" }],
+      describeTable: async () => {
+        throw new Error("value 'Tanaka Taro' is not valid");
+      },
+      primaryKey: async () => [],
+    } as unknown as DbAdapter;
+    const hidden = await schemaSections(db, { lang: "en", views: false, errors: false });
+    expect(hidden.unreadable).toEqual(["orders"]);
+    expect(hidden.sections[0]!.lines.join("\n")).toBe("### orders\n\nCould not be read: (the database's message is not shown)");
+    const shown = await schemaSections(db, { lang: "en", views: false });
+    expect(shown.sections[0]!.lines.join("\n")).toContain("Tanaka Taro");
   });
 });
 

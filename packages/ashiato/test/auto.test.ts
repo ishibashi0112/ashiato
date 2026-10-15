@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseActions } from "../src/chat/actions.js";
-import { formatAria, parseAria, shapeAria } from "../src/chat/aria.js";
+import { formatAria, isIdSegment, parseAria, shapeAria, toRecord, urlShape } from "../src/chat/aria.js";
 import { actionCode, likeness } from "../src/chat/auto.js";
 import { EXPORTED_HEADER, exportTest } from "../src/chat/exportTests.js";
 import { parseExpectedLines, parseVerifyFile } from "../src/chat/verifyFile.js";
@@ -193,6 +193,42 @@ describe("accessibility trees", () => {
     expect(formatAria(shapeAria(parseAria(yaml)))).toContain('- heading "受注 1042 鈴木商事" [level=1]');
   });
 
+  it("knows codes and query ids for records, but not hosts", () => {
+    expect(["C001", "ORD-2026-001", "2026-10-15", "1042"].filter(isIdSegment)).toEqual(["C001", "ORD-2026-001", "2026-10-15", "1042"]);
+    expect(["v2", "step3", "new", "edit", "oauth2"].some(isIdSegment)).toBe(false);
+    expect(toRecord("http://192.168.1.10/orders")).toBe(false);
+    expect(toRecord("http://app01.example.com:8080/orders?page=12")).toBe(false);
+    expect(toRecord("http://app01/orders/detail?id=1042")).toBe(true);
+    expect(toRecord("http://app01/customers/C001")).toBe(true);
+    expect(urlShape("http://192.168.1.10/customers/C001?tab=2")).toBe("http://192.168.1.10/customers/:id");
+  });
+
+  it("hides cards, description lists, addresses and links named by their query", () => {
+    const yaml = `- article:
+  - heading "山田 花子" [level=3]
+  - button "編集"
+- term: メール
+- definition:
+  - link "tanaka@example.com":
+    - /url: mailto:tanaka@example.com
+- link "03-1234-5678":
+  - /url: tel:0312345678
+- link "鈴木商事の受注":
+  - /url: /orders?customer=鈴木商事の受注
+- link "詳細":
+  - /url: javascript:void(0)
+- img "山田 花子"`;
+    const shaped = formatAria(shapeAria(parseAria(yaml)));
+    expect(shaped).toContain('- article:\n  - heading "…" [level=3]\n  - button "編集"');
+    expect(shaped).toContain('- definition:\n  - link "…"\n');
+    expect(shaped).toContain('- link "…"\n- link "…":\n  - /url: /orders\n');
+    expect(shaped).toContain('- link "詳細":\n  - /url: javascript:void(0)');
+    expect(shaped).not.toMatch(/tanaka|0312|鈴木/);
+    expect(shaped).toContain('- img "山田 花子"');
+    // a record's page: its images may show it too
+    expect(formatAria(shapeAria(parseAria(yaml), { record: true }))).toContain('- img "…"');
+  });
+
   it("measures how alike names are", () => {
     expect(likeness("登録", "登録")).toBe(1);
     expect(likeness("ＯＫ", "ok")).toBe(1);
@@ -220,12 +256,12 @@ describe("generated test code", () => {
     expect(code("開く: /orders")).toEqual(['await page.goto("/orders");']);
     expect(code("押す: 登録")).toEqual(['await clickable(page, "登録").click();']);
     expect(code("押す: 取消 (「1042」の行)")).toEqual(['await clickable(page.getByRole("row").filter({ hasText: "1042" }), "取消").click();']);
-    // header rows don't count
-    expect(code("押す: (最初の行)")).toEqual(['await page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).first().click();']);
+    // header rows (no data cell) don't count
+    expect(code("押す: (最初の行)")).toEqual(['await page.getByRole("row").filter({ has: page.locator("td, [role=cell], [role=gridcell]") }).first().click();']);
     // fields without a name, by their role
     expect(code("入力: spinbutton = 2 (「P001」の行)")).toEqual(['await page.getByRole("row").filter({ hasText: "P001" }).getByRole("spinbutton").fill("2");']);
     expect(code("選ぶ: リストボックス = 山田商事")).toEqual(['await ofRoles(page, ["combobox", "listbox"]).selectOption("山田商事");']);
-    expect(code("確認: textbox = 至急 (最後の行)")).toEqual(['await expect(page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).last().getByRole("textbox")).toHaveValue("至急");']);
+    expect(code("確認: textbox = 至急 (最後の行)")).toEqual(['await expect(page.getByRole("row").filter({ has: page.locator("td, [role=cell], [role=gridcell]") }).last().getByRole("textbox")).toHaveValue("至急");']);
     expect(code("押す: 文字「次へ」")).toEqual(['await page.getByText("次へ", { exact: true }).click();']);
     expect(code("入力: 数量 = 3")).toEqual(['await field(page, "数量").fill("3");']);
     expect(code("選ぶ: 得意先 = 鈴木商事")).toEqual(['await field(page, "得意先").selectOption("鈴木商事");']);
@@ -301,6 +337,18 @@ describe("generated test code", () => {
         "});",
       ].join("\n"),
     );
+  });
+
+  it("doesn't carry dialog answers to the next step, and keeps comments on one line", () => {
+    const file = parseVerifyFile(
+      "# t\n\n## 1. a\n\n操作:\n- ダイアログ: キャンセル\n- 押す: 削除\n\n## 2. b\n\n操作:\n- 押す: 保存\n\n## 3. 人が行う\n\n夜間バッチ\u2028を流す\n",
+      "ja",
+    );
+    const { code } = exportTest(file, { fileName: "t.verify.md" });
+    expect(code).toContain('  await test.step("1. a", async () => {\n    // no expected');
+    expect(code).toContain('  await test.step("2. b", async () => {\n    dialogs.length = 0;\n');
+    expect(code).toContain("  //   夜間バッチ を流す\n");
+    expect(code).not.toMatch(/[\u2028\u2029]/);
   });
 
   describe("ashiato export-tests", () => {

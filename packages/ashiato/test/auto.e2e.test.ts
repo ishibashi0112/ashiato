@@ -167,6 +167,31 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
     expect(pack.markdown).toContain("### /orders/new — 新規受注\n\n```yaml\n- navigation:");
     expect(pack.markdown).toContain("記録がまだありません。");
   }, 60_000);
+
+  it("finds the first row of data past a header row, and doesn't carry dialog answers to the next step", async () => {
+    const page = driven.page;
+    await page.goto("about:blank");
+    await page.setContent(`<table><thead><tr><th>品目</th><th></th></tr></thead><tbody>
+<tr><td>A001</td><td><button onclick="out.textContent='先頭を押した'">編集</button></td></tr>
+<tr><td>A002</td><td><button onclick="out.textContent='最後を押した'">編集</button></td></tr>
+</tbody></table><p id="out"></p><button onclick="out.textContent = confirm('消しますか') ? '消した' : 'やめた'">消す</button>`);
+    const file = parseVerifyFile(
+      "# t\n\n## 1. 行\n\n操作:\n- 押す: 編集 (最初の行)\n- 確認: 「先頭を押した」が表示される\n- 押す: 編集 (最後の行)\n- 確認: 「最後を押した」が表示される\n- ダイアログ: キャンセル\n\n" +
+        "## 2. 消す\n\n操作:\n- 押す: 消す\n- 確認: 「消した」が表示される\n\n## 3. 開く\n\n操作:\n- 開く: /orders\n",
+      "ja",
+    );
+    expect(file.actionProblems).toEqual([]);
+    const runner = new ActionRunner(page, { lang: "ja", actionTimeout: 1500 });
+    const [rows, remove, open] = file.steps.map((s) => s.actions!);
+    expect(await runner.run(rows!)).toEqual({ done: 5, dialogs: [] });
+    // the Cancel the first step gave, no dialog took: the next step's dialog is answered OK
+    const removed = await runner.run(remove!);
+    expect(removed.failed).toBeUndefined();
+    expect(removed.dialogs).toEqual([{ type: "confirm", message: "消しますか", accept: true }]);
+    // a path without the app's URL: said in words of its own, also to an AI told no values
+    const opened = await runner.run(open!);
+    expect(opened.failed!.valueFree.message).toBe('"/orders" is not a URL: give the app\'s URL with --app to open paths of it');
+  });
 });
 
 describe.skipIf(!canRun)("MCP tools pack and verify_auto", () => {

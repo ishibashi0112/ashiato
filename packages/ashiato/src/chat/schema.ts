@@ -14,6 +14,7 @@ const TEXT = {
     key: (cols: string[]) => `Primary key: ${cols.length ? cols.join(", ") : "(none)"}`,
     header: (comments: boolean) => `| Column | Type | Null |${comments ? " Comment |" : ""}`,
     unreadable: (why: string) => `Could not be read: ${why}`,
+    notShown: "(the database's message is not shown)",
     none: "(none)",
   },
   ja: {
@@ -25,6 +26,7 @@ const TEXT = {
     key: (cols: string[]) => `主キー:${cols.length ? cols.join(", ") : "(なし)"}`,
     header: (comments: boolean) => `| 列 | 型 | Null |${comments ? " コメント |" : ""}`,
     unreadable: (why: string) => `読み取れませんでした:${why}`,
+    notShown: "(DB のメッセージは表示しません)",
     none: "(なし)",
   },
 };
@@ -51,7 +53,8 @@ export interface SchemaSection {
 /** The definitions of the tables and views picked, each as its own Markdown section, tables first. */
 export async function schemaSections(
   db: DbAdapter,
-  options: { tables?: string[]; views?: boolean; lang: Lang },
+  /** `errors: false`: a table that can't be read doesn't say why (the database's message may hold values). */
+  options: { tables?: string[]; views?: boolean; lang: Lang; errors?: boolean },
 ): Promise<{ sections: SchemaSection[]; unreadable: string[] }> {
   if (!db.describeTable) throw new Error(`ashiato schema can't read table definitions on ${db.dialect}`);
   const t = TEXT[options.lang];
@@ -72,7 +75,8 @@ export async function schemaSections(
       if (isTable) key = await db.primaryKey(ref);
     } catch (e) {
       unreadable.push(tableId(ref));
-      return { table: ref, isTable, lines: [`### ${tableId(ref)}`, "", t.unreadable(e instanceof Error ? e.message : String(e))] };
+      const why = options.errors === false ? t.notShown : e instanceof Error ? e.message : String(e);
+      return { table: ref, isTable, lines: [`### ${tableId(ref)}`, "", t.unreadable(why)] };
     }
     const comments = info.columns.some((c) => c.comment);
     const lines = [`### ${tableId(ref)}${info.comment ? ` — ${markdownCell(info.comment)}` : ""}`, ""];

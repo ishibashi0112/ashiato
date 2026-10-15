@@ -9,6 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import { serveMcp, type McpTool } from "../src/agent/mcp.js";
 import { changesLine, problemShape, stepLine, stepShape, stepText } from "../src/agent/text.js";
+import { verifySummary } from "../src/agent/verifyText.js";
+import type { VerifyRun } from "../src/chat/verify.js";
 import { parseExpectedLines } from "../src/chat/verifyFile.js";
 import { matchChanges } from "../src/testing/match.js";
 import { agentTools, type AgentTools } from "../src/agent/tools.js";
@@ -191,6 +193,15 @@ describe("how changes differ, without values", () => {
       ].join("\n"),
     );
     expect(changesLine(diff)).toBe("orders +2, stock ~1 (qty), audit +1");
+  });
+
+  it("leaves the database's messages out of verify_auto's summary", () => {
+    const error = "Conversion failed when converting the varchar value 'Tanaka Taro' to data type int.";
+    expect(problemShape(`orders can't be compared: it could not be read: ${error}`)).toBe("orders can't be compared: it could not be read (the database's message is not shown)");
+    const run: VerifyRun = { startedAt: "2026-10-15T00:00:00Z", tables: [{ name: "orders" }], notCompared: [{ table: { name: "orders" }, reason: `it could not be read: ${error}` }], outcomes: [] };
+    const summary = verifySummary(run, { fileName: "checks/a.verify.md", lang: "en" });
+    expect(summary).toContain("not compared: orders (it could not be read)");
+    expect(summary).not.toContain("Tanaka");
   });
 });
 

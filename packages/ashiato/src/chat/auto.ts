@@ -1,7 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import type { Lang } from "../export/text.js";
 import type { RowScope, StepAction } from "./actions.js";
-import { formatAria, HIDDEN, namedNodes, parseAria, shapeAria, texts, type AriaNode } from "./aria.js";
+import { formatAria, HIDDEN, namedNodes, parseAria, shapeAria, texts, toRecord, type AriaNode } from "./aria.js";
 import { appUrl } from "./browser.js";
 
 /**
@@ -37,18 +37,24 @@ const ofRoles = (scope: Page | Locator, roles: string[]) => roles.map((role) => 
 /** A string literal (line and paragraph separators escaped). */
 export const q = (s: string) => JSON.stringify(s).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
+/**
+ * Rows of data hold a cell (`<td>`, or `role="cell"` in a grid): header rows (`<th>` only) don't
+ * count. Not by role: Playwright gives a `<th>` without `scope` the role `cell`.
+ */
+const DATA_CELL = "td, [role=cell], [role=gridcell]";
+
 /** A row showing a text, or the first or last row of data (header rows don't count). */
 function scopeCode(row: RowScope | undefined): string {
   if (!row) return "page";
   if ("text" in row) return `page.getByRole("row").filter({ hasText: ${q(row.text)} })`;
-  return `page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).${row.at}()`;
+  return `page.getByRole("row").filter({ has: page.locator(${q(DATA_CELL)}) }).${row.at}()`;
 }
 
 function scopeOf(page: Page, row: RowScope | undefined): Page | Locator {
   if (!row) return page;
   const rows = page.getByRole("row");
   if ("text" in row) return rows.filter({ hasText: row.text });
-  const data = rows.filter({ hasNot: page.getByRole("columnheader") });
+  const data = rows.filter({ has: page.locator(DATA_CELL) });
   return row.at === "first" ? data.first() : data.last();
 }
 
@@ -267,6 +273,8 @@ export class ActionRunner {
 
   async run(actions: StepAction[]): Promise<ActionRun> {
     this.dialogs = [];
+    // answers a step gave that no dialog took are not the next step's
+    this.answers.length = 0;
     const t = TEXT[this.options.lang];
     let done = 0;
     for (const a of actions) {
@@ -286,7 +294,12 @@ export class ActionRunner {
     const nodes = await this.nodes();
     if (!nodes) return undefined;
     const cut = (text: string) => (text.length > max ? `${text.slice(0, max)}\n…` : text);
-    return { text: cut(formatAria(shapeAria(nodes, { text: true }))), valueFree: cut(formatAria(shapeAria(nodes))) };
+    return { text: cut(formatAria(shapeAria(nodes, { text: true }))), valueFree: cut(formatAria(this.valueFree(nodes))) };
+  }
+
+  /** The tree without what may show the database's values (a page of one record: its headings too). */
+  private valueFree(nodes: AriaNode[]): AriaNode[] {
+    return shapeAria(nodes, { record: toRecord(this.page.url()) });
   }
 
   private async nodes(): Promise<AriaNode[] | undefined> {
@@ -303,9 +316,17 @@ export class ActionRunner {
     const timeout = this.timeout;
     const el = elementOf(page, a);
     switch (a.verb) {
-      case "open":
-        await page.goto(appUrl(a.target!, this.options.app, page.url()), { timeout: Math.max(timeout, 30_000) });
+      case "open": {
+        let url: string;
+        try {
+          url = appUrl(a.target!, this.options.app, page.url());
+        } catch (e) {
+          // what to give (the app's URL): nothing from the page
+          throw new Expected((e as Error).message);
+        }
+        await page.goto(url, { timeout: Math.max(timeout, 30_000) });
         return;
+      }
       case "fill":
         await el!.fill(a.value!, { timeout });
         return;
@@ -386,7 +407,7 @@ export class ActionRunner {
       const hint = !asText ? "" : a.verb === "click" ? ` ${t.textOnly(a.target!)}` : a.verb === "fill" || a.verb === "select" ? ` ${t.unlabelled(a.target!)}` : "";
       const message = `${t.notFound(what)}${hint}`;
       const candidates = similar(nodes, a);
-      const valueFree = similar(shapeAria(nodes), a).filter((c) => !c.includes(`"${HIDDEN}"`));
+      const valueFree = similar(this.valueFree(nodes), a).filter((c) => !c.includes(`"${HIDDEN}"`));
       return { ...base, message, ...(candidates.length ? { candidates } : {}), valueFree: { message, ...(valueFree.length ? { candidates: valueFree } : {}) } };
     }
     // found once, but it couldn't be done: hidden, disabled, not a select, an option that isn't there...

@@ -126,8 +126,11 @@ export function formatAria(nodes: AriaNode[], indent = 0): string {
 /** What hidden text is replaced with. */
 export const HIDDEN = "…";
 
-/** Roles that hold rows of data: their text, and the names of what is in them (but buttons), may be the database's values. */
-const DATA = new Set(["row", "cell", "gridcell", "rowheader", "option", "treeitem"]);
+/**
+ * Roles that hold data: their text, and the names of what is in them (but buttons), may be the
+ * database's values. Rows, options, a description list's values (`<dd>`) and cards (`<article>`).
+ */
+const DATA = new Set(["row", "cell", "gridcell", "rowheader", "option", "treeitem", "definition", "article"]);
 /**
  * Roles whose name is the app's own wording: what to press, where to type, what a section or column is.
  * Every other name, and all other text, may show the database's values.
@@ -188,13 +191,21 @@ const FOLD_TAIL: Record<string, number> = { row: 2 };
 export interface ShapeOptions {
   /** Keep all of the page's text (it may show the database's values). Default: only the app's wording. */
   text?: boolean;
-  /** The page shows one record (its path has an id): its headings may name it, so they are hidden too. */
+  /** The page shows one record (its URL has an id, `toRecord`): its headings and images may name it, so they are hidden too. */
   record?: boolean;
 }
 
-/** A path segment that is an id: a number, a UUID, a long hex string (`/orders/1042`). */
+/**
+ * A path segment that is an id: a number, a UUID, a long hex string (`/orders/1042`), or a code with
+ * two digits or more in a row (`/customers/C001`, `/orders/ORD-2026-001`, a date).
+ */
 export function isIdSegment(segment: string): boolean {
-  return /^\d+$/.test(segment) || /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(segment) || /^[0-9a-f]{24,}$/i.test(segment);
+  return (
+    /^\d+$/.test(segment) ||
+    /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(segment) ||
+    /^[0-9a-f]{24,}$/i.test(segment) ||
+    (/^[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*$/.test(segment) && /\d{2}/.test(segment))
+  );
 }
 
 /** Query parameters that pick a record: `id`, `customer_id`, `orderNo`, `code`. */
@@ -203,9 +214,9 @@ const RECORD_PARAM_CAMEL = /[a-z](?:Id|Code|Key|No)$|ID$/;
 /** Query parameters whose number picks a page of a list, not a record. */
 const LIST_PARAM = /^(?:page|p|offset|limit|size|per_?page|tab|step)$/i;
 
-/** A link to one record (`/customers/12`, `?customer_id=12`): its name is likely the record's (a customer's name). */
-function toRecord(url: string): boolean {
-  const [path = "", ...rest] = url.split("?");
+/** A URL of one record (`/customers/12`, `?customer_id=12`): a link's name is likely the record's (a customer's name), and so are such a page's headings. */
+export function toRecord(url: string): boolean {
+  const [path = "", ...rest] = url.replace(ORIGIN, "").split("?");
   if (path.split(/[/#]/).some(isIdSegment)) return true;
   const query = rest.join("?").replace(/#.*$/s, "");
   return query.split("&").some((pair) => {
@@ -214,6 +225,20 @@ function toRecord(url: string): boolean {
     return RECORD_PARAM.test(key) || RECORD_PARAM_CAMEL.test(key) || (isIdSegment(decoded(value)) && !LIST_PARAM.test(key));
   });
 }
+
+/** `https://host:port`: not part of the path (a host can look like a code: `app01`, `192.168.1.10`). */
+const ORIGIN = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i;
+
+/** An address that isn't a page (`mailto:`, `tel:`): it, and the link's name, are a person's or a company's. */
+const notPage = (url: string) => /^[a-z][a-z0-9+.-]*:/i.test(url) && !/^(?:https?|javascript):/i.test(url);
+
+/** A link whose query holds its own name (`/orders?customer=Suzuki` named "Suzuki"). */
+const nameInQuery = (url: string, name: string | undefined) =>
+  !!name?.trim() &&
+  (url.split("?")[1] ?? "")
+    .replace(/#.*$/s, "")
+    .split("&")
+    .some((pair) => decoded((pair.split("=")[1] ?? "").replace(/\+/g, " ")).trim() === name.trim());
 
 const decoded = (s: string) => {
   try {
@@ -225,6 +250,8 @@ const decoded = (s: string) => {
 
 /** A link's address without its query, with ids as `:id` (`/orders/1042?x=1` → `/orders/:id`); hash routes (`#/orders/7`) kept the same way. */
 export function urlShape(url: string): string {
+  const origin = ORIGIN.exec(url)?.[0] ?? "";
+  if (origin) return origin + urlShape(url.slice(origin.length));
   const at = url.indexOf("#");
   const base = at < 0 ? url : url.slice(0, at);
   const hash = at < 0 ? "" : url.slice(at + 1);
@@ -241,9 +268,10 @@ export function urlShape(url: string): string {
  * The tree as `ashiato pack` gives it to a chat: long lists folded, names of rows and of cells
  * holding controls left out (they repeat what is in them), and, unless `text`, everything that may
  * show the database's values replaced with `…`: text, cells, options, what fields hold, links and
- * fields inside rows, links to one record (`/customers/12`), and the headings of a page showing one
- * record. Kept: the names of buttons, other links, fields, headings, tabs, menus, dialogs and column
- * headers, and placeholders.
+ * fields inside rows, cards and description lists, links to one record (`/customers/12`), to an
+ * address that isn't a page (`mailto:`) or with their name in the query, and the headings and images
+ * of a page showing one record. Kept: the names of buttons, other links, fields, headings, tabs,
+ * menus, dialogs and column headers, and placeholders.
  */
 export function shapeAria(nodes: AriaNode[], options: ShapeOptions = {}): AriaNode[] {
   const visit = (list: AriaNode[], inData: boolean): AriaNode[] => {
@@ -268,13 +296,16 @@ export function shapeAria(nodes: AriaNode[], options: ShapeOptions = {}): AriaNo
     // a row's name is its cells' text, a cell's name what it holds: said again by the children
     const repeated = n.role === "row" || ((n.role === "cell" || n.role === "gridcell") && n.children.length > 0);
     const url = n.props.find(([k]) => k === "url")?.[1];
-    const named = keepName(n.role, data) && !(n.role === "link" && url && toRecord(url)) && !(n.role === "heading" && options.record);
+    const named =
+      keepName(n.role, data) &&
+      !(n.role === "link" && url && (toRecord(url) || notPage(url) || nameInQuery(url, n.name))) &&
+      !((n.role === "heading" || n.role === "img") && options.record);
     if (n.name !== undefined && n.name !== "" && !repeated) out.name = options.text || named ? n.name : HIDDEN;
     if (n.value !== undefined) out.value = options.text ? n.value : HIDDEN;
     for (const [k, v] of n.props) {
       if (k === "placeholder") out.props.push([k, v]);
       // a link's address can hold an id (/orders/1042) or a query
-      else if (k === "url" && (options.text || !data)) out.props.push([k, options.text ? v : urlShape(v)]);
+      else if (k === "url" && (options.text || (!data && !notPage(v)))) out.props.push([k, options.text ? v : urlShape(v)]);
     }
     return out;
   };

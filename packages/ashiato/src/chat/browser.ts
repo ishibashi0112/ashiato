@@ -66,12 +66,18 @@ export async function openBrowser(what: string, options: BrowserOptions): Promis
     return { page, context, close: async () => void (await browser.close().catch(() => undefined)) };
   }
   const browser = await pw.chromium.launch({ headless: !options.headed, executablePath: executable(pw, options.browser) });
-  const context = await browser.newContext({
-    ...(options.app ? { baseURL: options.app } : {}),
-    ...(options.storageState ? { storageState: options.storageState } : {}),
-  });
-  const page = await context.newPage();
-  return { page, context, close: () => browser.close() };
+  try {
+    const context = await browser.newContext({
+      ...(options.app ? { baseURL: options.app } : {}),
+      ...(options.storageState ? { storageState: options.storageState } : {}),
+    });
+    const page = await context.newPage();
+    return { page, context, close: () => browser.close() };
+  } catch (e) {
+    // a login file that can't be read, for example: the browser isn't left running
+    await browser.close().catch(() => undefined);
+    throw e;
+  }
 }
 
 /** `--browser` / ASHIATO_BROWSER, else Playwright's Chromium if installed, else Chrome / Edge on this machine. */

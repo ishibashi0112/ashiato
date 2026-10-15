@@ -39,6 +39,8 @@ export function exportTest(file: VerifyFile, options: ExportOptions): ExportedTe
   let usesExpect = false;
   const manual: string[] = [];
   let automated = 0;
+  /** A step before gave dialogs answers: they are not the next step's (as `verify --auto` does). */
+  let answered = false;
   const body: string[] = [];
   const emit = (line = "", depth = 1) => body.push(line ? `${"  ".repeat(depth)}${line}` : "");
 
@@ -47,8 +49,8 @@ export function exportTest(file: VerifyFile, options: ExportOptions): ExportedTe
     if (!step.actions) {
       manual.push(step.title);
       emit(`// ${oneLine(step.title)}: a person does this step (it has no actions), so the test leaves it out. TODO:`);
-      for (const l of step.body.split("\n").filter((l) => l.trim())) emit(`//   ${l.trim()}`);
-      if (step.expect) for (const l of step.expect.lines) emit(`//   expected: ${l}`);
+      for (const l of step.body.split("\n").filter((l) => l.trim())) emit(`//   ${oneLine(l)}`);
+      if (step.expect) for (const l of step.expect.lines) emit(`//   expected: ${oneLine(l)}`);
       continue;
     }
     automated++;
@@ -60,6 +62,8 @@ export function exportTest(file: VerifyFile, options: ExportOptions): ExportedTe
       run.push(...actionCode(a));
     }
     emit(`await test.step(${q(step.title)}, async () => {`);
+    if (answered) emit("dialogs.length = 0;", 2);
+    answered ||= step.actions.some((a) => a.verb === "dialog");
     if (step.expect) {
       emit("await expectDbChanges(async () => {", 2);
       for (const l of run) emit(l, 3);

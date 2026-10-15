@@ -356,7 +356,13 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
         log: (m) => console.log(m),
         auto,
       });
-      if (run.problems) return sendBack([{ fileName, file, problems: run.problems }], "Nothing more was checked: the file names tables that aren't watched.");
+      if (run.problems) {
+        // nothing of this file is checked, and what to correct goes back with the others' results
+        for (const p of run.problems) console.error(`${fileName}: ${p}`);
+        reports.push(fileProblemsReport(file, run.problems, { fileName, lang }));
+        process.exitCode = 1;
+        continue;
+      }
       runs.push({ fileName, run });
       reports.push(verifyReport(file, run, { fileName, dialect: db.dialect, lang }));
       if (run.outcomes.some((o) => o.verdict === "not-run")) break;
