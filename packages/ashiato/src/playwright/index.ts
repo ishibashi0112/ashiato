@@ -16,7 +16,7 @@
  */
 import { test as base, expect } from "@playwright/test";
 import type { DbChanges, ExpectedChanges } from "../testing/match.js";
-import { watchDb, type DbWatcher, type ExpectOptions, type WatchOptions } from "../testing/watch.js";
+import { expectationOf, watchDb, type DbWatcher, type ExpectedLines, type ExpectOptions, type WatchOptions } from "../testing/watch.js";
 
 export interface AshiatoOptions extends WatchOptions {
   /** Connection URL of the database the app writes to. Default: the ASHIATO_DB_URL environment variable. */
@@ -26,8 +26,9 @@ export interface AshiatoOptions extends WatchOptions {
 /**
  * Runs `action`, then waits until the database changes match `expected`: every table listed changed
  * exactly as described, and no other watched table changed. Resolves to the changes found.
+ * `expected` can also be `ashiato verify` lines: `["orders: inserted 1 row (customer_id=7)", "stock: updated 1 row (item_id=3) → (qty-=10)"]`.
  */
-export type ExpectDbChanges = (action: () => unknown, expected: ExpectedChanges, options?: ExpectOptions) => Promise<DbChanges>;
+export type ExpectDbChanges = (action: () => unknown, expected: ExpectedChanges | ExpectedLines, options?: ExpectOptions) => Promise<DbChanges>;
 
 export interface AshiatoFixtures {
   expectDbChanges: ExpectDbChanges;
@@ -61,10 +62,18 @@ export const test = base.extend<AshiatoFixtures, AshiatoWorkerFixtures>({
 
 export { expect };
 export type { AsymmetricMatcher, DbChanges, ExpectedChanges, RowPattern, TableChangeSet, TableChanges, UpdatePattern, ValueMatcher } from "../testing/match.js";
-export { DbChangesError, DbWatcher, watchDb, type ExpectOptions, type WatchOptions } from "../testing/watch.js";
+export { DbChangesError, DbWatcher, watchDb, type ExpectedLines, type ExpectOptions, type WatchOptions } from "../testing/watch.js";
 
 /** `orders +1, stock ~2`, for the step's title in the report. */
-function summarize(expected: ExpectedChanges): string {
+function summarize(written: ExpectedChanges | ExpectedLines): string {
+  let expected = written as ExpectedChanges;
+  if (typeof written === "string" || Array.isArray(written)) {
+    try {
+      expected = expectationOf(written).expected;
+    } catch {
+      return "(expected changes can't be read)";
+    }
+  }
   // a wrong expectation gets its own message from expectChanges
   if (typeof expected !== "object" || expected === null) return String(expected);
   const count = (v: number | readonly unknown[] | undefined) => (typeof v === "number" ? v : (v?.length ?? 0));

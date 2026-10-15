@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -10,8 +10,10 @@ import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
 import { schemaMarkdown } from "../chat/schema.js";
-import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport } from "../chat/verify.js";
-import { parseVerifyFile } from "../chat/verifyFile.js";
+import { ActionRunner } from "../chat/auto.js";
+import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
+import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport, type AutoRunner, type VerifyRun } from "../chat/verify.js";
+import { parseVerifyFile, type FileProblem, type VerifyFile } from "../chat/verifyFile.js";
 import { fileSource, recorderSource } from "../agent/source.js";
 import { stepLine, stepShape, stepText } from "../agent/text.js";
 import { agentTools } from "../agent/tools.js";
@@ -136,18 +138,7 @@ const shown = (path: string) => {
 
 /** The .sql files named (a folder: its .sql files, by name), read as UTF-8 or Shift_JIS. */
 function readSqlFiles(paths: string[]): SqlFile[] {
-  const files: string[] = [];
-  for (const p of paths) {
-    const path = resolve(p);
-    if (statSync(path).isDirectory()) {
-      const inFolder = readdirSync(path)
-        .filter((f) => /\.sql$/i.test(f))
-        .sort()
-        .map((f) => join(path, f));
-      if (!inFolder.length) throw new Error(`No .sql files in ${p}`);
-      files.push(...inFolder);
-    } else files.push(path);
-  }
+  const files = filesIn(paths, /\.sql$/i, ".sql");
   return files.map((f) => {
     try {
       return { name: shown(f), text: decodeText(readFileSync(f)) };
@@ -229,33 +220,95 @@ async function runQueryCommand(paths: string[], values: { db?: string; out?: str
   }
 }
 
-interface VerifyValues extends DeliverValues {
+interface BrowserValues {
+  app?: string;
+  headed?: boolean;
+  browser?: string;
+  cdp?: string;
+  login?: boolean;
+  "storage-state"?: string;
+}
+
+interface VerifyValues extends DeliverValues, BrowserValues {
   tables?: string;
   "ignore-columns"?: string;
   "max-rows"?: string;
   "full-read"?: boolean;
   "save-session"?: boolean;
   lang?: string;
+  auto?: boolean;
+}
+
+/** Files named, or the files of a folder whose names end with `suffix` (by name). */
+function filesIn(paths: string[], suffix: RegExp, what: string): string[] {
+  const files: string[] = [];
+  for (const p of paths) {
+    const path = resolve(p);
+    if (statSync(path).isDirectory()) {
+      const inFolder = readdirSync(path)
+        .filter((f) => suffix.test(f))
+        .sort()
+        .map((f) => join(path, f));
+      if (!inFolder.length) throw new Error(`No ${what} files in ${p}`);
+      files.push(...inFolder);
+    } else files.push(path);
+  }
+  return files;
+}
+
+/** The browser options of `pack` and `verify --auto`, with the login to use: `--login` saves one first (the person logs in). */
+async function browserOptions(values: BrowserValues, ask: (prompt: string) => Promise<string | null>): Promise<BrowserOptions> {
+  const options: BrowserOptions = { app: values.app, headed: values.headed, browser: values.browser, cdp: values.cdp };
+  if (values.app && !/^https?:\/\//i.test(values.app)) throw new Error(`--app takes the app's URL (http://localhost:5173), not "${values.app}"`);
+  const login = resolve(values["storage-state"] ?? DEFAULT_LOGIN);
+  if (values.login) {
+    if (!values.app) throw new Error("--login needs --app <url>: the page to log in on");
+    if (values.cdp) throw new Error("--login is for a browser ashiato starts: with --cdp, log in in the app itself");
+    console.log(`Opening ${values.app}: log in, then come back here.`);
+    await saveLogin({ ...options, app: values.app, file: login, waitForPerson: () => ask("When you have logged in, press Enter > ") });
+    console.log(`Saved the login to ${shown(login)} (it holds the session's cookies: keep it out of version control).`);
+  }
+  if (values["storage-state"] && !values.login && !existsSync(login)) throw new Error(`${values["storage-state"]} doesn't exist: save a login with --login first`);
+  if (!values.cdp && existsSync(login)) {
+    if (!values.login && !values["storage-state"]) console.log(`Using the login saved in ${shown(login)}.`);
+    options.storageState = login;
+  }
+  return options;
 }
 
 async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: string) {
-  const [path, ...extra] = paths;
-  if (!path || extra.length) throw new Error("Usage: ashiato verify <file.verify.md> --db <url>");
+  if (!paths.length) throw new Error("Usage: ashiato verify <file.verify.md | folder>... --db <url>");
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   if (!dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
   const lang = langOption(values.lang);
   const maxRows = values["max-rows"] === undefined ? undefined : Number(values["max-rows"]);
   if (maxRows !== undefined && (!Number.isInteger(maxRows) || maxRows < 1)) throw new Error("--max-rows takes a number of rows");
-  const fileName = shown(resolve(path));
-  const file = parseVerifyFile(decodeText(readFileSync(resolve(path))), lang);
+  for (const option of ["app", "headed", "cdp", "login", "storage-state"] as const) {
+    if (values[option] !== undefined && !values.auto) throw new Error(`--${option} is for --auto (the steps' actions are done in a browser)`);
+  }
+  const files = filesIn(paths, /\.verify\.md$/i, ".verify.md").map((path) => {
+    const fileName = shown(path);
+    try {
+      return { fileName, file: parseVerifyFile(decodeText(readFileSync(path)), lang) };
+    } catch (e) {
+      throw new Error(`${fileName}: ${(e as Error).message}`);
+    }
+  });
   const deliver = (markdown: string, what: string) => deliverReport(markdown, what, values, "split the steps into several files");
-  if (file.problems.length) {
+  const sendBack = (list: { fileName: string; file: VerifyFile; problems: (FileProblem | string)[] }[], why: string) => {
     // nothing is checked, and what to correct goes back to the chat
-    for (const p of file.problems) console.error(`${fileName}:${p.line}: ${p.message}`);
-    console.error("Nothing was checked: the file needs correcting.");
-    deliver(fileProblemsReport(file, file.problems, { fileName, lang }), "what to correct");
+    for (const { fileName, problems } of list) for (const p of problems) console.error(typeof p === "string" ? `${fileName}: ${p}` : `${fileName}:${p.line}: ${p.message}`);
+    console.error(why);
+    deliver(list.map(({ fileName, file, problems }) => fileProblemsReport(file, problems as FileProblem[], { fileName, lang })).join("\n"), "what to correct");
     process.exitCode = 1;
-    return;
+  };
+  const wrong = files
+    .map((f) => ({ ...f, problems: [...f.file.problems, ...(values.auto ? f.file.actionProblems : [])].sort((a, b) => a.line - b.line) }))
+    .filter((f) => f.problems.length);
+  if (wrong.length) return sendBack(wrong, "Nothing was checked: the file needs correcting.");
+  if (values.auto && !files.some((f) => f.file.steps.some((s) => s.actions))) {
+    const problem = lang === "ja" ? "「操作:」の行がある手順がありません(--auto はその操作を実行します)。" : "No step has actions (`Actions:`): --auto does those.";
+    return sendBack(files.map((f) => ({ ...f, problems: [{ line: 1, message: problem }] })), "Nothing was checked: no step has actions.");
   }
 
   const db = await connect(dbUrl);
@@ -263,48 +316,65 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
   // Ctrl+C ends the steps; the results so far are still copied
   const interrupted = () => input.close();
   process.once("SIGINT", interrupted);
+  let driven: Driven | undefined;
   try {
-    const run = await runVerify(db, file, {
-      lang,
-      tables: list(values.tables),
-      ignoreColumns: list(values["ignore-columns"]),
-      maxRows,
-      incremental: !values["full-read"],
-      ask: input.ask,
-      log: (m) => console.log(m),
-    });
-    if (run.problems) {
-      for (const p of run.problems) console.error(p);
-      console.error("Nothing was checked: the file names tables that aren't watched.");
-      deliver(fileProblemsReport(file, run.problems, { fileName, lang }), "what to correct");
-      process.exitCode = 1;
-      return;
+    let auto: AutoRunner | undefined;
+    if (values.auto) {
+      const options = await browserOptions(values, input.ask);
+      driven = await openBrowser("verify --auto", options);
+      const runner = new ActionRunner(driven.page, { lang, app: values.app });
+      auto = { run: (actions) => runner.run(actions), screen: () => runner.screen() };
     }
+    const reports: string[] = [];
+    const runs: { fileName: string; run: VerifyRun }[] = [];
+    for (const { fileName, file } of files) {
+      if (files.length > 1) console.log(`\n=== ${fileName}`);
+      const run = await runVerify(db, file, {
+        lang,
+        tables: list(values.tables),
+        ignoreColumns: list(values["ignore-columns"]),
+        maxRows,
+        incremental: !values["full-read"],
+        ask: input.ask,
+        log: (m) => console.log(m),
+        auto,
+      });
+      if (run.problems) return sendBack([{ fileName, file, problems: run.problems }], "Nothing more was checked: the file names tables that aren't watched.");
+      runs.push({ fileName, run });
+      reports.push(verifyReport(file, run, { fileName, dialect: db.dialect, lang }));
+      if (run.outcomes.some((o) => o.verdict === "not-run")) break;
+    }
+    const outcomes = runs.flatMap((r) => r.run.outcomes);
     const tally = (["ok", "ng", "unchecked", "skipped", "not-run", "error"] as const)
-      .map((v) => [v, run.outcomes.filter((o) => o.verdict === v).length] as const)
+      .map((v) => [v, outcomes.filter((o) => o.verdict === v).length] as const)
       .filter(([, n]) => n)
       .map(([v, n]) => `${verdictText(v, lang)} ${n}`)
       .join(" / ");
     console.log(`\n${tally}`);
-    deliver(verifyReport(file, run, { fileName, dialect: db.dialect, lang }), `the results of ${run.outcomes.length} step(s)`);
-    if (values["save-session"]) {
+    deliver(reports.join("\n"), `the results of ${outcomes.length} step(s)`);
+    if (values["save-session"] && runs.length) {
       const session: Session = {
         version: 1,
         id: randomUUID(),
-        startedAt: run.startedAt,
+        startedAt: runs[0]!.run.startedAt,
         dialect: db.dialect,
-        tables: run.tables,
+        tables: runs.at(-1)!.run.tables,
         // the checked steps, named with their result (Excel evidence shows the names)
-        steps: run.outcomes.flatMap((o, i) => stepOf(o, i, `[${verdictText(o.verdict, lang)}] ${o.step.title}`) ?? []).map((s, i) => ({ ...s, id: i + 1 })),
+        steps: runs
+          .flatMap(({ fileName, run }) =>
+            run.outcomes.flatMap((o, i) => stepOf(o, i, `[${verdictText(o.verdict, lang)}] ${runs.length > 1 ? `${fileName}: ` : ""}${o.step.title}`) ?? []),
+          )
+          .map((s, i) => ({ ...s, id: i + 1 })),
       };
       const sessionFile = sessionPath(resolve(".ashiato/sessions"), session);
       saveSession(sessionFile, session);
       console.log(`Saved the changes to ${shown(sessionFile)} (Excel evidence: ashiato export ${shown(sessionFile)})`);
     }
-    if (run.outcomes.some((o) => o.verdict === "ng" || o.verdict === "error")) process.exitCode = 1;
+    if (outcomes.some((o) => o.verdict === "ng" || o.verdict === "error")) process.exitCode = 1;
   } finally {
     process.off("SIGINT", interrupted);
     input.close();
+    await driven?.close().catch(() => undefined);
     await db.close();
   }
 }
@@ -373,6 +443,19 @@ export async function main(argv: string[]): Promise<void> {
       "no-views": { type: "boolean" },
       "no-clip": { type: "boolean" },
       "save-session": { type: "boolean" },
+      auto: { type: "boolean" },
+      app: { type: "string" },
+      headed: { type: "boolean" },
+      cdp: { type: "string" },
+      login: { type: "boolean" },
+      "storage-state": { type: "string" },
+      pages: { type: "string" },
+      "max-pages": { type: "string" },
+      "max-chars": { type: "string" },
+      sessions: { type: "string" },
+      tests: { type: "string" },
+      code: { type: "string" },
+      "page-text": { type: "boolean" },
       version: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },

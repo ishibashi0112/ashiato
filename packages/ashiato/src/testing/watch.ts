@@ -3,7 +3,28 @@ import type { DbAdapter } from "../adapters/types.js";
 import { diffSnapshots, tableId } from "../core/diff.js";
 import { TableReader } from "../core/reader.js";
 import type { Diff, Snapshot } from "../core/types.js";
+import { parseExpectedLines } from "../chat/verifyFile.js";
 import { checkExpectation, describeDiff, matchChanges, tableProblems, type DbChanges, type ExpectedChanges, type WatchedTable } from "./match.js";
+
+/**
+ * Expected changes written as `ashiato verify` lines, one per line or as one text:
+ * `orders: inserted 1 row (customer_id=7, qty=10)`, `stock: updated 1 row (item_id=3) → (qty-=10)`,
+ * `other tables: any` (Japanese works too: `orders: 追加 1 行 (...)`). Values are compared as a person
+ * reads them (`10` is `10.00`, a date is any time that day), as `ashiato verify` does.
+ */
+export type ExpectedLines = readonly string[] | string;
+
+/** The expectation, and whether tables it doesn't list may change. Throws a TypeError for one that isn't shaped right. */
+export function expectationOf(expected: ExpectedChanges | ExpectedLines): { expected: ExpectedChanges; unlisted: "unchanged" | "any" } {
+  if (typeof expected === "string" || Array.isArray(expected)) {
+    const lines = typeof expected === "string" ? expected.split(/\r\n|\r|\n/) : (expected as readonly unknown[]).map(String);
+    const { expect, problems } = parseExpectedLines(lines);
+    if (problems.length) throw new TypeError(`expected changes can't be read:\n${problems.map((p) => `  line ${p.line}: ${p.message}`).join("\n")}`);
+    return { expected: expect.expected, unlisted: expect.unlisted };
+  }
+  checkExpectation(expected as ExpectedChanges);
+  return { expected: expected as ExpectedChanges, unlisted: "unchanged" };
+}
 
 export interface ExpectOptions {
   /** How long to wait for the expected changes after the action. Default 5000ms. */
@@ -72,17 +93,19 @@ export class DbWatcher {
   /**
    * Runs `action`, then waits until the database changes match `expected`: every table listed changed
    * exactly as described, and no other watched table changed. Resolves to the changes found.
+   * `expected` can also be written as `ashiato verify` lines (see {@link ExpectedLines}).
    */
-  expectChanges(action: () => unknown, expected: ExpectedChanges, options: ExpectOptions = {}): Promise<DbChanges> {
+  expectChanges(action: () => unknown, expected: ExpectedChanges | ExpectedLines, options: ExpectOptions = {}): Promise<DbChanges> {
+    let expectation: ReturnType<typeof expectationOf>;
     try {
       if (this.closing) throw new Error("this database watcher is closed");
-      checkExpectation(expected);
+      expectation = expectationOf(expected);
       checkOptions(options);
       checkTimes(this.options, "watcher option");
     } catch (e) {
       return Promise.reject(e);
     }
-    const run = this.queue.then(() => this.run(action, expected, options));
+    const run = this.queue.then(() => this.run(action, expectation.expected, options, expectation.unlisted));
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -119,7 +142,7 @@ export class DbWatcher {
     return this.starting;
   }
 
-  private async run(action: () => unknown, expected: ExpectedChanges, options: ExpectOptions): Promise<DbChanges> {
+  private async run(action: () => unknown, expected: ExpectedChanges, options: ExpectOptions, unlisted: "unchanged" | "any"): Promise<DbChanges> {
     const o = { timeout: 5000, settleMs: 300, pollMs: 100, ...defined(this.options), ...defined(options) };
     await this.start();
     const reader = this.reader!;
@@ -140,7 +163,7 @@ export class DbWatcher {
       for (const id of read.reset) reset.add(id);
       this.last = read.snapshot;
       const diff = diffSnapshots(baseline, read.snapshot, { ignoreColumns: this.options.ignoreColumns });
-      const result = matchChanges(diff, expected, watchedIn(baseline, read.snapshot));
+      const result = matchChanges(diff, expected, watchedIn(baseline, read.snapshot), { unlisted });
       const now = Date.now();
       if (result.ok) {
         const text = JSON.stringify(diff.tables);

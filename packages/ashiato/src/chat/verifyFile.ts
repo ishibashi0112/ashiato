@@ -1,6 +1,7 @@
 import { exactDecimal } from "../core/normalize.js";
 import type { JsonValue } from "../core/types.js";
 import type { Lang } from "../export/text.js";
+import { parseActions, type StepAction } from "./actions.js";
 import { ChangeBy, OTHER_COLUMNS, valueMatches, type ExpectedChanges, type RowPattern, type TableChanges, type UpdatePattern } from "../testing/match.js";
 
 /**
@@ -24,14 +25,18 @@ export interface VerifyFile {
   steps: VerifyStep[];
   /** What is wrong with the file: nothing is checked while there is any. */
   problems: FileProblem[];
+  /** What is wrong with the steps' actions: only `verify --auto` and `export-tests` carry them out (a person reads them as text). */
+  actionProblems: FileProblem[];
 }
 
 export interface VerifyStep {
   /** The heading, without `## `. */
   title: string;
   line: number;
-  /** What to do: the step's text before its expected changes. */
+  /** What to do: the step's text before its expected changes (with its actions, as written). */
   body: string;
+  /** What `verify --auto` does, from the lines under `操作:` (`Actions:`). Absent when the step has none: a person does it. */
+  actions?: StepAction[];
   /** Absent when the step lists no expected changes: what changed is shown, not checked. */
   expect?: StepExpectation;
 }
@@ -113,7 +118,7 @@ const KINDS: Record<string, keyof TableChanges> = {
 export function parseVerifyFile(text: string, lang: Lang): VerifyFile {
   const t = TEXT[lang];
   const lines = text.replace(/^\uFEFF/, "").split(/\r\n|\r|\n/);
-  const file: VerifyFile = { title: "", intro: "", steps: [], problems: [] };
+  const file: VerifyFile = { title: "", intro: "", steps: [], problems: [], actionProblems: [] };
   const intro: string[] = [];
   let step: { title: string; line: number; body: string[]; items: { line: number; text: string }[] | undefined } | undefined;
   const steps: NonNullable<typeof step>[] = [];
@@ -158,13 +163,18 @@ export function parseVerifyFile(text: string, lang: Lang): VerifyFile {
   if (!steps.length) file.problems.push({ line: 1, message: t.noSteps });
   for (const s of steps) {
     const out: VerifyStep = { title: s.title, line: s.line, body: trimLines(s.body) };
+    const acted = parseActions(s.body, s.line + 1, lang);
+    file.actionProblems.push(...acted.problems);
+    if (acted.actions?.length) out.actions = acted.actions;
+    const actionLines = new Set(acted.actions?.map((a) => a.line));
     if (s.items) {
       const parsed = expectation(s.items, t);
       file.problems.push(...parsed.problems);
       out.expect = parsed.expect;
     } else {
       // expected changes without the line above them would never be checked
-      const looksExpected = s.body.findIndex((l) => {
+      const looksExpected = s.body.findIndex((l, i) => {
+        if (actionLines.has(s.line + 1 + i)) return false;
         const item = /^\s*[-*+・]\s+(.+?)\s*[:：]\s*(.*)$/.exec(l);
         return item && (NOTHING.test(item[2]!.replace(/[。.]$/, "")) || typeof change(item[2]!, t) !== "string");
       });
@@ -173,7 +183,21 @@ export function parseVerifyFile(text: string, lang: Lang): VerifyFile {
     file.steps.push(out);
   }
   file.problems.sort((a, b) => a.line - b.line);
+  file.actionProblems.sort((a, b) => a.line - b.line);
   return file;
+}
+
+/**
+ * Expected changes written as a verification's lines (`orders: inserted 1 row (customer_id=7)`,
+ * `other tables: any`), for `expectDbChanges`: the expectation, or what is wrong with the lines (line
+ * numbers count from 1). The language of the messages follows the lines unless given.
+ */
+export function parseExpectedLines(lines: readonly string[], lang?: Lang): { expect: StepExpectation; problems: FileProblem[] } {
+  const items = lines
+    .map((text, i) => ({ line: i + 1, text: String(text).replace(/^\s*(?:[-*+・]|\d+[.)])\s+/, "").trim() }))
+    .filter((i) => i.text);
+  const t = TEXT[lang ?? (lines.some((l) => /[\u3040-\u30ff\u4e00-\u9fff]/.test(String(l))) ? "ja" : "en")];
+  return expectation(items, t);
 }
 
 const trimLines = (lines: string[]) => lines.join("\n").replace(/^\s*\n|\s+$/g, "");

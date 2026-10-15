@@ -11,4 +11,4 @@ export type * from "./core/types.js";
 export { exportEvidence, type ExportFormat, type ExportOptions, type ExportResult } from "./export/index.js";
 export { startServer, type ServerOptions } from "./server/server.js";
 export type { AsymmetricMatcher, DbChanges, ExpectedChanges, RowPattern, TableChangeSet, TableChanges, UpdatePattern, ValueMatcher } from "./testing/match.js";
-export { DbChangesError, DbWatcher, watchDb, type ExpectOptions, type WatchOptions } from "./testing/watch.js";
+export { DbChangesError, DbWatcher, watchDb, type ExpectedLines, type ExpectOptions, type WatchOptions } from "./testing/watch.js";
