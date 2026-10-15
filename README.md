@@ -338,6 +338,7 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 4. ✅ Faster checkpoints for large tables: re-read only the buckets whose checksum changed (`xmin`, `rowversion`, `ORA_ROWSCN`, row hashes)
 5. ✅ Evidence export (Excel / PDF) with screenshots of each step
 6. ✅ `expectDbChanges()` for Playwright, tests generated from recordings, CLI / MCP server for AI agents
+7. ⬜ E2E tests from an AI chat: `pack` writes what the chat needs (each page's accessibility tree, page → table mapping, table definitions), `verify --auto` runs the chat's steps with Playwright, `export-tests` writes the stable ones as Playwright tests ([concept, Japanese](docs/e2e-from-chat.ja.md))
 
 ## Development
 
@@ -611,6 +612,7 @@ HAVING o.total <> SUM(l.qty * l.price);
 4. ✅ 大きなテーブル向けの高速化:チェックサムが変わったバケットだけを読み直す(`xmin`・`rowversion`・`ORA_ROWSCN`・行ハッシュ)
 5. ✅ テスト証跡の出力(Excel / PDF)。各ステップの画面キャプチャ付き
 6. ✅ Playwright 向け `expectDbChanges()`、記録からのテストコード生成、AIエージェント向けの CLI / MCP サーバー
+7. ⬜ AIチャットから E2E テストを作る:`pack` がチャットに渡す材料(各画面のアクセシビリティ木・画面→テーブルの対応・テーブル定義)を書き出し、`verify --auto` がチャットの書いた手順を Playwright で実行し、`export-tests` が安定した手順を Playwright のテストにする([構想メモ](docs/e2e-from-chat.ja.md))
 
 ## License
 
