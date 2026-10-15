@@ -174,7 +174,7 @@ export function pageActions(sessions: Session[], lang: Lang): PageAction[] {
       const requests = [
         ...new Set(a.requests.map((r) => (r.kind === "http" ? `${r.method} ${pagePath(r.url ?? "")}` : `WebView2 ${r.method}`))),
       ];
-      const changes = changesLine(step.diff) || none;
+      const changes = changesLine(step.diff, { direction: true }) || none;
       const action = labelShape(step);
       const key = JSON.stringify([page, action, requests]);
       const found = byKey.get(key);
@@ -211,6 +211,8 @@ export interface PackParts {
   actions: PageAction[];
   /** How many recordings the actions come from. */
   recordings: number;
+  /** Columns the recordings ignored (`--ignore-columns`): their changes aren't in the actions. */
+  ignoredColumns?: string[];
   tables: SchemaSection[];
   tests: ExistingTests[];
   /** Code to add at the end (repomix's output), as much as fits. */
@@ -238,7 +240,9 @@ const TEXT = {
     status: (n: number) => `(HTTP ${n})`,
     failed: (e: string) => `Could not be opened: ${e}`,
     actions: "## What actions changed in the database (recorded)",
-    actionsIntro: (n: number) => `From ${n} recording(s) of \`ashiato record\`: counts and columns only, no values.`,
+    actionsIntro: (n: number) => `From ${n} recording(s) of \`ashiato record\`: counts and columns only, no values (+ inserted, ~ updated, - deleted; ↑ / ↓: the number went up / down).`,
+    ignored: (columns: string) =>
+      `The recordings ignore changes of ${columns} (\`--ignore-columns\`): they are not in the changed columns. Leave them out of the expected changes too; the person runs \`ashiato verify\` with the same \`--ignore-columns\`.`,
     actionsHead: "| Action | Requests | Changes | Times |",
     noActions: "No recordings yet: record a session with `ashiato record` (and the Vite plugin) going through the app, and this part is filled in.",
     notRecorded: (list: string) => `Pages with nothing recorded: ${list}.`,
@@ -264,7 +268,9 @@ const TEXT = {
     status: (n: number) => `(HTTP ${n})`,
     failed: (e: string) => `開けませんでした: ${e}`,
     actions: "## 画面の操作と DB の変化(記録から)",
-    actionsIntro: (n: number) => `\`ashiato record\` の記録 ${n} 件から集めました。件数と列名だけで、値は入れていません。`,
+    actionsIntro: (n: number) => `\`ashiato record\` の記録 ${n} 件から集めました。件数と列名だけで、値は入れていません(+ 追加、~ 更新、- 削除。↑ / ↓ は数値が増えた / 減った)。`,
+    ignored: (columns: string) =>
+      `記録では ${columns} の変化を数えていません(\`--ignore-columns\`)。変わった列に出ていないのはそのためです。期待する DB の変化にもこの列は書かないでください(\`ashiato verify\` も同じ \`--ignore-columns\` を付けて実行します)。`,
     actionsHead: "| 操作 | 通信 | DB の変化 | 回数 |",
     noActions: "記録がまだありません。`ashiato record`(と Vite プラグイン)で一通り操作して記録すると、ここに入ります。",
     notRecorded: (list: string) => `記録がない画面: ${list}`,
@@ -327,6 +333,7 @@ export function packMarkdown(parts: PackParts): Pack {
     if (parts.recordings === 0) out.push(t.noActions);
     else {
       out.push(t.actionsIntro(parts.recordings));
+      if (parts.ignoredColumns?.length) out.push("", t.ignored(parts.ignoredColumns.join(", ")));
       if (actions.length) out.push("", actions.map((c) => c.text).join("\n\n"));
       if (notRecorded.length) out.push("", t.notRecorded(notRecorded.join(", ")));
     }
@@ -428,12 +435,20 @@ export async function makePack(input: PackInput): Promise<PackResult> {
     pageText: input.pageText,
     actions,
     recordings: input.sessions.length,
+    ignoredColumns: ignoredColumns(input.sessions),
     tables,
     tests: input.tests,
     code: input.code,
     maxChars: input.maxChars,
   });
   return { pack, pages, actions, tables, unreadable };
+}
+
+/** The columns the recordings ignored (`--ignore-columns`), as first written. */
+export function ignoredColumns(sessions: Session[]): string[] {
+  const seen = new Map<string, string>();
+  for (const s of sessions) for (const c of s.options?.ignoreColumns ?? []) if (!seen.has(c.toLowerCase())) seen.set(c.toLowerCase(), c);
+  return [...seen.values()];
 }
 
 /** What `left` says, in a line: `2 page(s), recorded actions`. Empty when nothing was left out. */
@@ -490,7 +505,7 @@ const INSTRUCTIONS_JA = `## お願いしたいこと
 
 - 1 つのユースケースを 1 ファイルにします。ファイルごとに、ファイル名(\`checks/受注登録.verify.md\` など)を 1 行書き、その下に中身をコードブロック(\`\`\`markdown)で出してください。
 - プログラム(Playwright のテストコードなど)は書かないでください。手順だけを書きます。
-- 手順に使う値(得意先コード、品目、既存の受注番号など)が要るときは、まずそれを探す SELECT 文を書いてください。人が \`ashiato query\` で実行して、結果を貼ります。
+- 手順に使う値(得意先コード、品目、既存の受注番号など)が要るときは、まずそれを探す SELECT 文を、冒頭に書いた DB の書き方で書いてください。人が \`ashiato query\` で実行して、結果を貼ります。
 - 分からないことは推測で書かず、ファイルの外に「確認したいこと」として箇条書きにしてください。
 
 ## 手順ファイルの形式
@@ -512,15 +527,16 @@ ${EXAMPLE_JA}
 | \`選ぶ: 得意先 = 鈴木商事\` | リストボックスで選ぶ(選択肢の表示名か値) |
 | \`チェック: 在庫不足のみ\` / \`チェックを外す: 在庫不足のみ\` | チェックボックス・ラジオボタン |
 | \`押す: 登録\` | ボタン・リンク・タブ・メニューを押す |
-| \`押す: 取消 (「1042」の行)\` | 表の、その文字が出ている行の中のボタンを押す(\`(最後の行)\` \`(最初の行)\` も可) |
+| \`押す: 取消 (「1042」の行)\` | 表の、その文字が出ている行の中のボタンを押す(\`(最後の行)\` \`(最初の行)\` も可。見出し行は数えず、画面にあるすべての表の行で数える) |
+| \`入力: spinbutton = 2 (「P001」の行)\` | 名前のない欄は、木にある役割名(\`textbox\` \`spinbutton\` \`combobox\` \`checkbox\` など)を名前の代わりに書く。その範囲(画面全体か、その行)にその種類の欄が 1 つだけのときに使える |
 | \`キー: Enter\` | キーを押す(いま入力している欄で) |
 | \`待つ: 「処理が終わりました」が表示される\` | 表示されるまで待つ(30 秒まで) |
 | \`確認: 「登録しました」が表示される\` | 画面に出ていることを確かめる(\`が表示されない\` も可) |
 | \`確認: 数量 = 3\` | 入力欄の値を確かめる |
 | \`ダイアログ: キャンセル\` | 次に出るダイアログに答える。書かなければ OK で答えます。prompt には入れる文字を書きます |
 
-- 名前は、下の「画面」のアクセシビリティ木にある名前を、一字一句そのまま使ってください。ボタンやリンクは \`button "登録"\` の \`登録\`、入力欄は \`textbox "数量"\` や \`combobox "得意先"\` の名前(画面のラベル)です。CSS セレクターや XPath は書きません。
-- 木にない名前は使えません。名前のない入力欄でも \`/placeholder\` があれば、その文字を名前に使えます。どちらもなければ「確認したいこと」に書いてください。
+- 名前は、下の「画面」のアクセシビリティ木にある名前を、一字一句そのまま使ってください(完全一致で探すので、「顧客名」と書いても「顧客名で検索」には当たりません)。ボタンやリンクは \`button "登録"\` の \`登録\`、入力欄は \`textbox "数量"\` や \`combobox "得意先"\` の名前(画面のラベル)です。CSS セレクターや XPath は書きません。
+- 木にない名前は使えません。名前のない欄は役割名で書きます(上の表)。同じ種類の欄が画面に複数あれば、行で絞ります。それでも決まらなければ「確認したいこと」に書いてください。
 - 「…」は、DB の値が出ている可能性があるため隠したところです。その値は使えません。
 - \`確認:\` の文言は、木にあるものか、画面の動きから確かなものだけにしてください。
 
@@ -575,7 +591,7 @@ From this material, work out what the app is for and how it is used. Then, for e
 
 - One use case per file. For each file, write its name on a line (\`checks/order-entry.verify.md\`), then its content in a code block (\`\`\`markdown).
 - Don't write code (Playwright tests or anything else): only the steps.
-- When the steps need values (customer codes, items, existing order numbers), first write SELECT statements that find them. The person runs them with \`ashiato query\` and pastes the results.
+- When the steps need values (customer codes, items, existing order numbers), first write SELECT statements that find them, for the database named at the top. The person runs them with \`ashiato query\` and pastes the results.
 - Don't guess: list what you are unsure of under "Questions", outside the files.
 
 ## The format
@@ -597,15 +613,16 @@ ${EXAMPLE_EN}
 | \`select: Customer = Suzuki Trading\` | Picks in a list box (the option's text or value) |
 | \`check: In stock only\` / \`uncheck: In stock only\` | Check boxes and radio buttons |
 | \`click: Save\` | Clicks a button, link, tab or menu item |
-| \`click: Cancel (row "1042")\` | Clicks the button in the table row showing that text (\`(last row)\`, \`(first row)\` too) |
+| \`click: Cancel (row "1042")\` | Clicks the button in the table row showing that text (\`(last row)\`, \`(first row)\` too: header rows don't count, and the rows of every table on the page do) |
+| \`fill: spinbutton = 2 (row "P001")\` | A field without a name: write its role in the tree (\`textbox\`, \`spinbutton\`, \`combobox\`, \`checkbox\`...) in place of the name. Only when the scope (the page, or the row) has one field of that kind |
 | \`press: Enter\` | Presses a key (in the field being typed in) |
 | \`wait: "Done" is shown\` | Waits until it is shown (up to 30 seconds) |
 | \`expect: "Saved" is shown\` | Checks it is on the page (\`is not shown\` too) |
 | \`expect: Quantity = 3\` | Checks a field's value |
 | \`dialog: Cancel\` | Answers the next dialog. Without it, dialogs are answered with OK; for a prompt, write the text to type |
 
-- Write names exactly as the accessibility trees under "Pages" have them: a button or link by the name in \`button "Save"\`, a field by the name in \`textbox "Quantity"\` or \`combobox "Customer"\` (its label). No CSS selectors or XPath.
-- Names not in the tree can't be used. A field without a name can be named by its \`/placeholder\`. If it has neither, ask under "Questions".
+- Write names exactly as the accessibility trees under "Pages" have them (they are matched whole: \`Customer\` doesn't find \`Customer search\`): a button or link by the name in \`button "Save"\`, a field by the name in \`textbox "Quantity"\` or \`combobox "Customer"\` (its label). No CSS selectors or XPath.
+- Names not in the tree can't be used. A field without a name is written by its role (above); when the page has several of that kind, pick one by its row. If that doesn't tell it either, ask under "Questions".
 - \`…\` is text hidden because it may show the database's values: it can't be used.
 - Only expect texts that are in the tree, or that the page's behaviour makes certain.
 

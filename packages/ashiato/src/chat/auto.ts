@@ -23,30 +23,42 @@ const field = (scope: Page | Locator, label: string) => scope.getByLabel(label, 
   checkable: `/** A check box, radio button or switch with this name, as \`ashiato verify --auto\` finds it. */
 const checkable = (scope: Page | Locator, name: string) =>
   (${JSON.stringify(CHECKABLE).replace(/,/g, ", ")} as const).map((role) => scope.getByRole(role, { name, exact: true })).reduce((a, b) => a.or(b));`,
+  ofRoles: `/** The element of one of these kinds, whatever its name (it has none), as \`ashiato verify --auto\` finds it. */
+const ofRoles = (scope: Page | Locator, roles: Parameters<Page["getByRole"]>[0][]) => roles.map((role) => scope.getByRole(role)).reduce((a, b) => a.or(b));`,
 };
 export type Helper = keyof typeof HELPERS;
 
 const clickable = (scope: Page | Locator, name: string) => CLICKABLE.map((role) => scope.getByRole(role, { name, exact: true })).reduce((a, b) => a.or(b));
 const field = (scope: Page | Locator, label: string) => scope.getByLabel(label, { exact: true }).or(scope.getByPlaceholder(label, { exact: true }));
 const checkable = (scope: Page | Locator, name: string) => CHECKABLE.map((role) => scope.getByRole(role, { name, exact: true })).reduce((a, b) => a.or(b));
+type Role = Parameters<Page["getByRole"]>[0];
+const ofRoles = (scope: Page | Locator, roles: string[]) => roles.map((role) => scope.getByRole(role as Role)).reduce((a, b) => a.or(b));
 
 /** A string literal (line and paragraph separators escaped). */
 export const q = (s: string) => JSON.stringify(s).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
+/** A row showing a text, or the first or last row of data (header rows don't count). */
 function scopeCode(row: RowScope | undefined): string {
   if (!row) return "page";
-  return "text" in row ? `page.getByRole("row").filter({ hasText: ${q(row.text)} })` : `page.getByRole("row").${row.at}()`;
+  if ("text" in row) return `page.getByRole("row").filter({ hasText: ${q(row.text)} })`;
+  return `page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).${row.at}()`;
 }
 
 function scopeOf(page: Page, row: RowScope | undefined): Page | Locator {
   if (!row) return page;
   const rows = page.getByRole("row");
-  return "text" in row ? rows.filter({ hasText: row.text }) : row.at === "first" ? rows.first() : rows.last();
+  if ("text" in row) return rows.filter({ hasText: row.text });
+  const data = rows.filter({ hasNot: page.getByRole("columnheader") });
+  return row.at === "first" ? data.first() : data.last();
 }
 
 /** The element an action acts on, as code (after `await `), and the helper it uses. Undefined for actions on no element. */
 export function elementCode(a: StepAction): { code: string; helper?: Helper } | undefined {
   const scope = scopeCode(a.row);
+  if (a.roles && (a.verb !== "expect" || a.shown === undefined)) {
+    if (a.roles.length === 1) return { code: `${scope}.getByRole(${q(a.roles[0]!)})` };
+    return { code: `ofRoles(${scope}, [${a.roles.map(q).join(", ")}])`, helper: "ofRoles" };
+  }
   switch (a.verb) {
     case "click":
       if (!a.target) return { code: scope };
@@ -67,6 +79,7 @@ export function elementCode(a: StepAction): { code: string; helper?: Helper } | 
 /** The same element on a live page. */
 function elementOf(page: Page, a: StepAction): Locator | undefined {
   const scope = scopeOf(page, a.row);
+  if (a.roles && (a.verb !== "expect" || a.shown === undefined)) return ofRoles(scope, a.roles);
   switch (a.verb) {
     case "click":
       if (!a.target) return scope as Locator;
@@ -157,6 +170,7 @@ const TEXT = {
   en: {
     notFound: (what: string) => `${what} was not found on the page.`,
     several: (what: string, n: number) => `${what} matches ${n} elements: name one of them (a row: \`click: Cancel (row "1042")\`).`,
+    severalUnnamed: (what: string, n: number) => `There are ${n} of ${what}: say which by its row (\`fill: spinbutton = 2 (row "P001")\`).`,
     noRow: (row: string) => `No table row shows "${row}".`,
     textOnly: (name: string) => `"${name}" is on the page as text, not as a button or link: write \`click: text "${name}"\`.`,
     unlabelled: (name: string) => `"${name}" is on the page as text, but it isn't the label of a field (the field has no name): use the field's placeholder, or another field's name.`,
@@ -175,6 +189,7 @@ const TEXT = {
     clickable: (name: string) => `a button or link "${name}"`,
     field: (name: string) => `a field "${name}"`,
     checkable: (name: string) => `a check box or radio button "${name}"`,
+    unnamed: (kind: string) => `a ${kind}`,
     text: (name: string) => `the text "${name}"`,
     row: (row: RowScope) => ("text" in row ? ` in the row showing "${row.text}"` : ` in the ${row.at} row`),
     theRow: (row: RowScope) => ("text" in row ? `the row showing "${row.text}"` : `the ${row.at} row`),
@@ -185,6 +200,7 @@ const TEXT = {
   ja: {
     notFound: (what: string) => `${what}が画面に見つかりません。`,
     several: (what: string, n: number) => `${what}が ${n} 個あります。どれか 1 つを指定してください(行なら「押す: キャンセル (「1042」の行)」)。`,
+    severalUnnamed: (what: string, n: number) => `${what}が ${n} 個あります。どれかを行で指定してください(「入力: spinbutton = 2 (「P001」の行)」)。`,
     noRow: (row: string) => `「${row}」を含む表の行がありません。`,
     textOnly: (name: string) => `「${name}」はボタンやリンクではなく文字として画面にあります。「押す: 文字「${name}」」と書いてください。`,
     unlabelled: (name: string) => `「${name}」は文字として画面にありますが、入力欄のラベルになっていません(入力欄に名前がありません)。入力欄のプレースホルダーか、ほかの名前を使ってください。`,
@@ -203,6 +219,7 @@ const TEXT = {
     clickable: (name: string) => `ボタンかリンク「${name}」`,
     field: (name: string) => `入力欄「${name}」`,
     checkable: (name: string) => `チェックボックスかラジオボタン「${name}」`,
+    unnamed: (kind: string) => `${kind}`,
     text: (name: string) => `文字「${name}」`,
     row: (row: RowScope) => ("text" in row ? `(「${row.text}」の行)` : row.at === "first" ? "(最初の行)" : "(最後の行)"),
     theRow: (row: RowScope) => ("text" in row ? `「${row.text}」の行` : row.at === "first" ? "最初の行" : "最後の行"),
@@ -361,7 +378,7 @@ export class ActionRunner {
     const what = describe(a, t);
     if (!el) return { ...base, message: firstLine(e.message), valueFree: { message: t.failed } };
     const count = await el.count().catch(() => -1);
-    if (count > 1) return said(t.several(what, count));
+    if (count > 1) return said(a.roles ? t.severalUnnamed(what, count) : t.several(what, count));
     if (count === 0) {
       if (a.row && "text" in a.row && (await (scopeOf(this.page, a.row) as Locator).count().catch(() => 1)) === 0) return said(t.noRow(a.row.text));
       // only whether the name written is on the page as text: it is the step's own
@@ -412,6 +429,7 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.replace(/\
 
 function describe(a: StepAction, t: Text): string {
   const row = a.row ? t.row(a.row) : "";
+  if (a.roles) return t.unnamed(a.target!) + row;
   if (a.verb === "click" && !a.target) return t.theRow(a.row!);
   if (a.verb === "click") return (a.byText ? t.text(a.target!) : t.clickable(a.target!)) + row;
   if (a.verb === "check" || a.verb === "uncheck") return t.checkable(a.target!) + row;
@@ -422,8 +440,13 @@ const FIELD_ROLES = new Set(["textbox", "searchbox", "spinbutton", "combobox", "
 
 /** What on the page has a name like the one written, of the kind the action needs (or, when none is alike, all of that kind). */
 function similar(nodes: AriaNode[], a: StepAction, max = 8): string[] {
-  const roles: ReadonlySet<string> =
-    a.verb === "click" ? new Set<string>(CLICKABLE) : a.verb === "check" || a.verb === "uncheck" ? new Set<string>(CHECKABLE) : FIELD_ROLES;
+  const roles: ReadonlySet<string> = a.roles
+    ? new Set(a.roles)
+    : a.verb === "click"
+      ? new Set<string>(CLICKABLE)
+      : a.verb === "check" || a.verb === "uncheck"
+        ? new Set<string>(CHECKABLE)
+        : FIELD_ROLES;
   // a list box's options (<select>) are picked with select, not clicked
   const inSelect = new Set(collect(nodes, (n) => n.role === "combobox").flatMap((n) => n.children));
   const named = namedNodes(nodes).filter((n) => roles.has(n.role) && !inSelect.has(n));

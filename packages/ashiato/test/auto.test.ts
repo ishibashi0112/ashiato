@@ -54,6 +54,14 @@ describe("parseActions", () => {
       { verb: "dialog", accept: false },
       { verb: "dialog", accept: true, value: "理由です" },
     ]);
+    const unnamed = actions(["- 入力: spinbutton = 2 (「P001」の行)", "- 選ぶ: combobox = 山田商事", "- チェック: チェックボックス (最初の行)", "- 入力: 入力欄 = x"]);
+    expect(unnamed.problems).toEqual([]);
+    expect(unnamed.actions!.map(({ line, written, ...a }) => a)).toEqual([
+      { verb: "fill", target: "spinbutton", value: "2", roles: ["spinbutton"], row: { text: "P001" } },
+      { verb: "select", target: "combobox", value: "山田商事", roles: ["combobox"] },
+      { verb: "check", target: "チェックボックス", roles: ["checkbox"], row: { at: "first" } },
+      { verb: "fill", target: "入力欄", value: "x", roles: ["textbox", "searchbox", "spinbutton"] },
+    ]);
     expect(list![0]).toMatchObject({ line: 11, written: "開く: /orders/new" });
 
     const en = actions(['- open: /orders', '- click: Cancel (row "1042")', '- expect: "Saved" is shown', "- press: Enter", "- wait: 500ms", "- dialog: OK"], "en");
@@ -69,8 +77,9 @@ describe("parseActions", () => {
   });
 
   it("says what is wrong with each line", () => {
-    const { problems } = actions(["- 開く:", "- 入力: 数量", "- 削除する: 受注", "- 待つ: 2 分", "- 確認: 登録できること", "- キー: 長いキーの名前"]);
-    expect(problems.map((p) => p.line)).toEqual([11, 12, 13, 14, 15, 16]);
+    const { problems } = actions(["- 開く:", "- 入力: 数量", "- 削除する: 受注", "- 待つ: 2 分", "- 確認: 登録できること", "- キー: 長いキーの名前", "- 入力: checkbox = 3"]);
+    expect(problems.map((p) => p.line)).toEqual([11, 12, 13, 14, 15, 16, 17]);
+    expect(problems[6]!.message).toBe("「入力」は checkbox には使えません。textbox / searchbox / spinbutton / combobox を書いてください。");
     expect(problems[1]!.message).toBe("「入力: 欄の名前 = 値」の形で書いてください(欄の名前は画面のラベルのとおり)。");
     expect(problems[2]!.message).toMatch(/^「削除する」は操作の種類ではありません。/);
     expect(parseActions(["操作:", "画面を開いて登録する"], 1, "en").problems).toEqual([{ line: 2, message: "Write each action on a line of its own starting with `- `." }]);
@@ -120,7 +129,11 @@ describe("accessibility trees", () => {
     - row "4 伊藤":
       - cell "4"
     - row "5 加藤":
-      - cell "5"`;
+      - cell "5"
+    - row "6 遠藤":
+      - cell "6"
+    - row "7 後藤":
+      - cell "7"`;
 
   it("reads and writes Playwright's YAML", () => {
     // a value is quoted only when it has to be
@@ -140,8 +153,9 @@ describe("accessibility trees", () => {
     expect(shaped).toContain('- columnheader "得意先"');
     expect(shaped).toContain('- cell "…"');
     expect(shaped).toContain('- button "取消"');
-    expect(shaped).toContain("- text: (+2 rows)");
-    expect(shaped).not.toMatch(/鈴木|田中|佐藤|page=2/);
+    // the first rows and the last two (what was just added)
+    expect(shaped).toContain('- text: (+2 rows)\n    - row:\n      - cell "…"\n    - row:\n      - cell "…"');
+    expect(shaped).not.toMatch(/鈴木|田中|佐藤|後藤|page=2/);
     // the text kept when asked
     expect(formatAria(shapeAria(parseAria(YAML), { text: true }))).toContain('- cell "鈴木商事"');
   });
@@ -206,7 +220,12 @@ describe("generated test code", () => {
     expect(code("開く: /orders")).toEqual(['await page.goto("/orders");']);
     expect(code("押す: 登録")).toEqual(['await clickable(page, "登録").click();']);
     expect(code("押す: 取消 (「1042」の行)")).toEqual(['await clickable(page.getByRole("row").filter({ hasText: "1042" }), "取消").click();']);
-    expect(code("押す: (最初の行)")).toEqual(['await page.getByRole("row").first().click();']);
+    // header rows don't count
+    expect(code("押す: (最初の行)")).toEqual(['await page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).first().click();']);
+    // fields without a name, by their role
+    expect(code("入力: spinbutton = 2 (「P001」の行)")).toEqual(['await page.getByRole("row").filter({ hasText: "P001" }).getByRole("spinbutton").fill("2");']);
+    expect(code("選ぶ: リストボックス = 山田商事")).toEqual(['await ofRoles(page, ["combobox", "listbox"]).selectOption("山田商事");']);
+    expect(code("確認: textbox = 至急 (最後の行)")).toEqual(['await expect(page.getByRole("row").filter({ hasNot: page.getByRole("columnheader") }).last().getByRole("textbox")).toHaveValue("至急");']);
     expect(code("押す: 文字「次へ」")).toEqual(['await page.getByText("次へ", { exact: true }).click();']);
     expect(code("入力: 数量 = 3")).toEqual(['await field(page, "数量").fill("3");']);
     expect(code("選ぶ: 得意先 = 鈴木商事")).toEqual(['await field(page, "得意先").selectOption("鈴木商事");']);

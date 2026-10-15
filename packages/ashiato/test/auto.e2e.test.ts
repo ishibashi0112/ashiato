@@ -132,7 +132,7 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
   }, 60_000);
 
   it("packs each page's accessibility tree without what may show the database's values", async () => {
-    app.db.exec("INSERT INTO orders (customer_id, qty, updated_at) VALUES (8, 2, 'x'), (7, 4, 'x'), (7, 5, 'x'), (8, 6, 'x')");
+    app.db.exec("INSERT INTO orders (customer_id, qty, updated_at) VALUES (8, 2, 'x'), (7, 4, 'x'), (7, 5, 'x'), (8, 6, 'x'), (7, 7, 'x'), (8, 8, 'x')");
     visits.length = 0;
     const pages = await crawlPages(driven.page, { app: `${url}/` });
     expect(pages.map((p) => [p.path, p.title])).toEqual([

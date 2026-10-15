@@ -9,7 +9,7 @@ import { serveMcp } from "../agent/mcp.js";
 import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
-import { leftOut, makePack, type PackResult } from "../chat/pack.js";
+import { ignoredColumns, leftOut, makePack, type PackResult } from "../chat/pack.js";
 import { existingTests, filesIn, readSessions } from "../chat/files.js";
 import { schemaMarkdown } from "../chat/schema.js";
 import { ActionRunner } from "../chat/auto.js";
@@ -43,7 +43,10 @@ Usage:
   ashiato mcp --db <url> [record options] [--share-values]   (or --recorder <url>)
   ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--out docs/db/schema.md] [--lang ja|en]
   ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
-  ashiato verify <file.verify.md> --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
+  ashiato verify <file.verify.md | folder>... --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
+                 [--auto --app <url> [--login] [--storage-state <file>] [--headed] [--cdp <url>]]
+  ashiato pack [--app <url>] [--db <url>] [--pages /a,/b] [--sessions <folder>] [--tests <folder>] [--code <file>] [--out <file>] [--max-chars 100000]
+  ashiato export-tests <file.verify.md | folder>... [--out tests/e2e/] [--app <url>] [--ignore-columns c] [--force]
 
 Options:
   --db <url>              Connection URL (or set ASHIATO_DB_URL). Read-only access is enough.
@@ -81,7 +84,7 @@ For AI agents and scripts:
   --json                  JSON instead of text
   --no-values             Tables, columns and counts only: no row values
   mcp                     An MCP server (stdio) for AI agents: start_recording, checkpoint, list_steps,
-                          get_step, stop_recording, generate_test, export_evidence, list_tables.
+                          get_step, stop_recording, generate_test, export_evidence, list_tables, pack, verify_auto.
                           With --db it records itself (timeline on --port); with --recorder it reads
                           a running \`ashiato record\`.
   --share-values          mcp: give the AI the rows' values. Without it the AI sees tables, columns and
@@ -107,7 +110,35 @@ For AI chats (no agent: you carry the text between the chat and this machine):
                           verify: tables with more rows than this are not watched (default 100000)
   --no-clip               query / verify: don't copy to the clipboard (without --out, the results are printed)
   --save-session          verify: also save the changes as a session in .ashiato/sessions (for export / show)
-  --lang <ja|en>          schema / query / verify: language of the text around the data (default: the machine's)
+  --lang <ja|en>          schema / query / verify / pack: language of the text around the data (default: the machine's)
+
+End-to-end checks from a chat (the chat writes the steps, ashiato runs them in a browser with Playwright):
+  pack                    Material for the chat in one text: what to write and how, each page's accessibility
+                          tree (read in a browser, following the app's links; text that may show the database's
+                          values is replaced with …), which recorded actions changed which tables (from
+                          .ashiato/sessions), the table definitions and the tests there are already.
+                          Written to docs/ashiato/pack.md and copied to the clipboard.
+  verify --auto           Does the steps' actions (\`操作:\` / \`Actions:\` lines) in a browser and compares what
+                          changed with what each step expects. A step that fails says why, with the names on
+                          the page like the one written and the page's tree. Steps without actions: you do them.
+  export-tests            Each verification as a Playwright test (tests/e2e/<name>.spec.ts, ashiato/playwright)
+  --app <url>             The app's URL (pack: its pages are read; verify / export-tests: paths open from it)
+  --login                 Open the app in a browser to log in first; the login is saved to .ashiato/login.json
+                          and used from then on (it holds cookies: keep it out of version control)
+  --storage-state <file>  A login saved with --login (default .ashiato/login.json, when there is one)
+  --headed                Show the browser
+  --cdp <url>             Use a browser that is already running (a WebView2 app started with
+                          --remote-debugging-port), at http://127.0.0.1:<port>
+  --pages <list>          pack: paths to read instead of following links
+  --max-pages <n>         pack: pages read at most when following links (default 20)
+  --page-text             pack: keep the pages' text (it may show the database's values)
+  --sessions <path>       pack: recordings (a folder or .json files; default .ashiato/sessions)
+  --tests <folder>        pack: where the tests there are already are (default tests, e2e, test, playwright, checks)
+  --code <file>           pack: code to add at the end (e.g. repomix's output), as much as fits
+  --max-chars <n>         pack: at most this many characters (default 100000); the later parts are left out first
+  --out <path>            pack: the file (default docs/ashiato/pack.md; - for the terminal)
+                          export-tests: the folder (default tests/e2e/), or a file for one verification
+  --force                 export-tests: overwrite tests that export-tests didn't write
 
 While recording, press Enter to take a checkpoint (type a label first if you like).
 `;
@@ -487,6 +518,8 @@ async function runPackCommand(values: PackValues, dbUrl?: string) {
   info(
     `${out ? `Wrote ${shown(out)}` : "Packed"}: ${pages.length} page(s), ${actions.length} recorded action(s) from ${sessions.length} recording(s), ${tables.length} table(s); ${pack.markdown.length.toLocaleString("en-US")} characters.`,
   );
+  const ignored = ignoredColumns(sessions);
+  if (ignored.length) info(`Note: the recordings ignore changes of ${ignored.join(", ")}: run ashiato verify with --ignore-columns ${ignored.join(",")} too.`);
   if (values["page-text"]) info("Note: --page-text keeps the pages' text, which may show the database's values: check that your company allows pasting them into the chat.");
   const left = leftOut(pack.left);
   if (left) {

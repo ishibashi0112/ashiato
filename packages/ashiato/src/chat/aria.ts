@@ -182,6 +182,8 @@ const WORDING = new Set([
 const WORDING_IN_DATA = new Set(["button", "columnheader"]);
 /** Long runs of these are folded: the first few are shown. */
 const FOLD: Record<string, number> = { row: 3, listitem: 8, option: 8, treeitem: 8, article: 3, gridcell: 50, cell: 50 };
+/** And the last few: what was just added is often at the end (`(最後の行)`). */
+const FOLD_TAIL: Record<string, number> = { row: 2 };
 
 export interface ShapeOptions {
   /** Keep all of the page's text (it may show the database's values). Default: only the app's wording. */
@@ -247,12 +249,15 @@ export function shapeAria(nodes: AriaNode[], options: ShapeOptions = {}): AriaNo
   const visit = (list: AriaNode[], inData: boolean): AriaNode[] => {
     const out: AriaNode[] = [];
     let run = 0;
+    let total = 0;
     list.forEach((n, i) => {
       run = i > 0 && list[i - 1]!.role === n.role ? run + 1 : 1;
+      if (run === 1) total = runLength(list, i);
       const keep = FOLD[n.role];
-      if (keep === undefined || run <= keep) return void out.push(shapeNode(n, inData));
-      // one line for the rest of the run
-      if (run === keep + 1) out.push({ role: "text", value: `(+${runLength(list, i)} ${plural(n.role)})`, attrs: [], props: [], children: [] });
+      const tail = FOLD_TAIL[n.role] ?? 0;
+      if (keep === undefined || total <= keep + tail || run <= keep || run > total - tail) return void out.push(shapeNode(n, inData));
+      // one line for the middle of the run
+      if (run === keep + 1) out.push({ role: "text", value: `(+${total - keep - tail} ${plural(n.role)})`, attrs: [], props: [], children: [] });
     });
     return out;
   };

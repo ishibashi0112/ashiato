@@ -52,7 +52,7 @@ describe("pageActions", () => {
         page: "/orders/new",
         action: 'click button "保存"',
         requests: ["POST /api/orders", "GET /api/orders"],
-        changes: ["dbo.orders +1, dbo.stock ~1 (qty)", "dbo.orders +2, dbo.stock ~1 (qty)"],
+        changes: ["dbo.orders +1, dbo.stock ~1 (qty↓)", "dbo.orders +2, dbo.stock ~1 (qty↓)"],
         times: 2,
       },
     ]);
@@ -110,7 +110,7 @@ describe("packMarkdown", () => {
     expect(markdown).toContain("database: SQL Server");
     expect(markdown).toContain("### /admin (went to /login)");
     expect(markdown).toContain("### /broken\n\nCould not be opened: net::ERR_CONNECTION_REFUSED");
-    expect(markdown).toContain("| click button | POST /api/orders, GET /api/orders | dbo.orders +1, dbo.stock ~1 (qty) | 1 |");
+    expect(markdown).toContain("| click button | POST /api/orders, GET /api/orders | dbo.orders +1, dbo.stock ~1 (qty↓) | 1 |");
     expect(markdown).toContain("Pages with nothing recorded: /, /orders.");
     // the tables the recordings changed come first
     expect(markdown.indexOf("### dbo.orders")).toBeLessThan(markdown.indexOf("### dbo.audit_log"));
@@ -169,6 +169,7 @@ describe("ashiato pack CLI", () => {
     const session = sampleSession();
     session.dialect = "sqlite";
     session.tables = [{ name: "orders" }, { name: "stock" }];
+    session.options = { ...session.options, ignoreColumns: ["updated_at"] };
     for (const s of session.steps) for (const t of s.diff.tables) delete (t.table as { schema?: string }).schema;
     writeFileSync(join(sessions, "2026-10-11T04-00-00-000Z.json"), JSON.stringify(session));
     writeFileSync(join(sessions, "notes.json"), "{}");
@@ -180,11 +181,14 @@ describe("ashiato pack CLI", () => {
     await main(["pack", "--db", `sqlite:${app.file}`, "--sessions", sessions, "--tests", tests, "--lang", "ja", "--no-clip", "--out", out]);
     const md = readFileSync(out, "utf8");
     expect(md).toContain("### /orders/new\n\n| 操作 | 通信 | DB の変化 | 回数 |");
-    expect(md).toContain("| click button | POST /api/orders, GET /api/orders | orders +1, stock ~1 (qty) | 1 |");
+    expect(md).toContain("| click button | POST /api/orders, GET /api/orders | orders +1, stock ~1 (qty↓) | 1 |");
     expect(md).toContain("## テーブル定義\n\n### orders");
     expect(md).toMatch(/- .*orders\.spec\.ts: enters an order/);
     expect(md).toMatch(/- .*受注\.verify\.md: 受注の登録 \/ 1\. 登録する/);
     expect(md).not.toContain("## 画面\n");
+    // the chat is told which columns the recordings didn't count, and the person to verify the same way
+    expect(md).toContain("記録では updated_at の変化を数えていません");
+    expect(logs.join("\n")).toContain("run ashiato verify with --ignore-columns updated_at too.");
     expect(logs.join("\n")).toMatch(/Wrote .*pack\.md: 0 page\(s\), 2 recorded action\(s\) from 1 recording\(s\), 3 table\(s\);/);
   });
 

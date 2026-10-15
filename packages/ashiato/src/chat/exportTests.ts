@@ -103,7 +103,7 @@ export function exportTest(file: VerifyFile, options: ExportOptions): ExportedTe
     ...(helpers.size ? ['import type { Locator, Page } from "@playwright/test";'] : []),
     "",
     ...(use.length ? ["test.use({", ...use.map((u) => `  ${u}`), "});", ""] : []),
-    ...(["clickable", "field", "checkable"] as const).filter((h) => helpers.has(h)).flatMap((h) => [HELPERS[h], ""]),
+    ...(["clickable", "field", "checkable", "ofRoles"] as const).filter((h) => helpers.has(h)).flatMap((h) => [HELPERS[h], ""]),
     `test(${q(title)}, async ({ page, expectDbChanges }) => {`,
     ...dialogs.map((l) => `  ${l}`),
     ...body,

@@ -132,15 +132,33 @@ export function stepShape(step: Step) {
   };
 }
 
-/** `orders +1, stock ~1 (qty)`: what changed, in counts and the columns updated (empty when nothing did). */
-export function changesLine(diff: Diff): string {
+/**
+ * `orders +1, stock ~1 (qty)`: what changed, in counts and the columns updated (empty when nothing
+ * did). With `direction`, a number column every update raised or lowered says so: `stock ~1 (qty↓)`.
+ */
+export function changesLine(diff: Diff, options: { direction?: boolean } = {}): string {
   return diff.tables
     .map((t) => {
       const counts = [t.inserted.length && `+${t.inserted.length}`, t.updated.length && `~${t.updated.length}`, t.deleted.length && `-${t.deleted.length}`].filter(Boolean);
-      const columns = [...new Set(t.updated.flatMap((u) => u.changed))];
+      const columns = [...new Set(t.updated.flatMap((u) => u.changed))].map((c) => (options.direction ? c + directionOf(t, c) : c));
       return `${tableId(t.table)} ${counts.join(" ")}${columns.length ? ` (${columns.join(", ")})` : ""}`;
     })
     .join(", ");
+}
+
+/** ↑ when every update of the column raised a number, ↓ when every one lowered it, else nothing. */
+function directionOf(t: TableDiff, column: string): string {
+  const number = (v: JsonValue | undefined) => (typeof v === "number" ? v : typeof v === "string" && /^-?\d+(?:\.\d+)?$/.test(v.trim()) ? Number(v) : undefined);
+  const signs = new Set(
+    t.updated
+      .filter((u) => u.changed.includes(column))
+      .map((u) => {
+        const before = number(u.before[column]);
+        const after = number(u.after[column]);
+        return before === undefined || after === undefined ? 0 : Math.sign(after - before);
+      }),
+  );
+  return signs.size === 1 && signs.has(1) ? "↑" : signs.size === 1 && signs.has(-1) ? "↓" : "";
 }
 
 /**

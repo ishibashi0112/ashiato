@@ -37,6 +37,12 @@ export interface StepAction {
   accept?: boolean;
   /** click: the target is a text on the page, not a button or link (`押す: 文字「次へ」`). */
   byText?: boolean;
+  /**
+   * fill, select, check, uncheck, expect (a field's value): the target is a kind of element, not a
+   * name (`入力: spinbutton = 3 (「P001」の行)`): the one element with one of these roles in the scope,
+   * for elements without a name.
+   */
+  roles?: string[];
   /** The element is in a table row: the one showing this text, or the first or last row. Without a target (click), the row itself. */
   row?: RowScope;
 }
@@ -104,6 +110,7 @@ const TEXT = {
     waitLong: "Wait at most 60 seconds.",
     key: "Write the key: `press: Enter` (Tab, Escape, ArrowDown, Control+A...).",
     dialog: "Write the answer to the next dialog: `dialog: OK`, `dialog: Cancel`, or the text to type in a prompt.",
+    role: (word: string, verb: string, fits: string) => `${verb} can't act on a ${word}: use ${fits}.`,
   },
   ja: {
     verb: (word: string) => `「${word}」は操作の種類ではありません。開く・入力・選ぶ・チェック・チェックを外す・押す・キー・待つ・確認・ダイアログのどれかで書いてください。`,
@@ -118,8 +125,49 @@ const TEXT = {
     waitLong: "待つのは 60 秒までにしてください。",
     key: "押すキーを「キー: Enter」のように書いてください(Tab、Escape、ArrowDown、Control+A なども使えます)。",
     dialog: "次に出るダイアログへの答えを「ダイアログ: OK」「ダイアログ: キャンセル」、または prompt に入れる文字で書いてください。",
+    role: (word: string, verb: string, fits: string) => `「${verb}」は ${word} には使えません。${fits} を書いてください。`,
   },
 };
+
+/**
+ * Kinds of elements written in place of a name, for elements that have none: the roles of the
+ * accessibility tree, and words for them. The element is then the one of that kind in the scope.
+ */
+const ROLE_WORDS: Record<string, string[]> = {
+  textbox: ["textbox"],
+  searchbox: ["searchbox"],
+  spinbutton: ["spinbutton"],
+  combobox: ["combobox"],
+  listbox: ["listbox"],
+  checkbox: ["checkbox"],
+  radio: ["radio"],
+  switch: ["switch"],
+  入力欄: ["textbox", "searchbox", "spinbutton"],
+  field: ["textbox", "searchbox", "spinbutton"],
+  リストボックス: ["combobox", "listbox"],
+  "list box": ["combobox", "listbox"],
+  チェックボックス: ["checkbox"],
+  "check box": ["checkbox"],
+  ラジオボタン: ["radio"],
+  "radio button": ["radio"],
+};
+/** The roles each verb can act on. */
+const VERB_ROLES: Partial<Record<ActionVerb, string[]>> = {
+  fill: ["textbox", "searchbox", "spinbutton", "combobox"],
+  expect: ["textbox", "searchbox", "spinbutton", "combobox", "listbox"],
+  select: ["combobox", "listbox"],
+  check: ["checkbox", "radio", "switch"],
+  uncheck: ["checkbox", "radio", "switch"],
+};
+
+/** `spinbutton` → the roles it stands for, when the verb can act on them; a message when it can't. */
+function rolesOf(target: string, verb: ActionVerb, word: string, t: Text): string[] | string | undefined {
+  const roles = ROLE_WORDS[target.toLowerCase().replace(/\s+/g, " ")];
+  if (!roles) return undefined;
+  const fits = VERB_ROLES[verb] ?? [];
+  const usable = roles.filter((r) => fits.includes(r));
+  return usable.length ? usable : t.role(target, word, fits.join(" / "));
+}
 
 /** `操作:`, `**操作:**`, `### Actions` */
 const MARKER = /^(?:操作|操作手順|actions?)\s*[:：]?$/i;
@@ -191,14 +239,18 @@ function parseAction(text: string, line: number, t: Text): StepAction | string {
       const scoped = withRow(rest);
       const pair = splitPair(scoped.text);
       if (!pair || !pair.label) return t.pair(word);
-      return { ...action, target: pair.label, value: pair.value, ...scoped.row };
+      const roles = rolesOf(pair.label, verb, word, t);
+      if (typeof roles === "string") return roles;
+      return { ...action, target: pair.label, value: pair.value, ...(roles ? { roles } : {}), ...scoped.row };
     }
     case "check":
     case "uncheck": {
       const scoped = withRow(rest);
       const name = unquote(scoped.text);
       if (!name) return t.name;
-      return { ...action, target: name, ...scoped.row };
+      const roles = rolesOf(name, verb, word, t);
+      if (typeof roles === "string") return roles;
+      return { ...action, target: name, ...(roles ? { roles } : {}), ...scoped.row };
     }
     case "click": {
       const scoped = withRow(rest);
@@ -223,9 +275,12 @@ function parseAction(text: string, line: number, t: Text): StepAction | string {
     case "expect": {
       const shown = shownText(rest);
       if (shown) return { ...action, ...shown };
-      const pair = splitPair(rest);
+      const scoped = withRow(rest);
+      const pair = splitPair(scoped.text);
       if (!pair || !pair.label) return t.expect;
-      return { ...action, target: pair.label, value: pair.value };
+      const roles = rolesOf(pair.label, verb, word, t);
+      if (typeof roles === "string") return roles;
+      return { ...action, target: pair.label, value: pair.value, ...(roles ? { roles } : {}), ...scoped.row };
     }
     case "dialog": {
       const answer = rest.trim();
