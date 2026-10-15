@@ -90,7 +90,8 @@ export const WAIT_TEXT_MS = 30_000;
 /** The lines of a generated test that do the action (each after the test's indentation). */
 export function actionCode(a: StepAction): string[] {
   const el = elementCode(a)?.code;
-  const shown = (text: string) => `page.getByText(${q(text)}).filter({ visible: true })`;
+  // `visible=true` rather than filter({ visible: true }), which needs Playwright 1.51
+  const shown = (text: string) => `page.getByText(${q(text)}).locator("visible=true")`;
   switch (a.verb) {
     case "open":
       return [`await page.goto(${q(a.target!)});`];
@@ -283,7 +284,7 @@ export class ActionRunner {
   }
 
   private async shown(text: string, hidden: boolean, timeout: number, t: Text): Promise<void> {
-    const visible = this.page.getByText(text).filter({ visible: true });
+    const visible = this.page.getByText(text).locator("visible=true");
     if (!hidden) {
       await visible
         .first()

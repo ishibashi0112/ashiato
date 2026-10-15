@@ -13,6 +13,7 @@ import { crawlPages, packMarkdown, pageActions, testTitles, type ExistingTests, 
 import { schemaMarkdown, schemaSections, type SchemaSection } from "../chat/schema.js";
 import { ActionRunner } from "../chat/auto.js";
 import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
+import { EXPORTED_HEADER, exportTest } from "../chat/exportTests.js";
 import { fileProblemsReport, runVerify, stepOf, verdictText, verifyReport, type AutoRunner, type VerifyRun } from "../chat/verify.js";
 import { parseVerifyFile, type FileProblem, type VerifyFile } from "../chat/verifyFile.js";
 import { fileSource, recorderSource } from "../agent/source.js";
@@ -380,6 +381,64 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
   }
 }
 
+interface ExportTestsValues {
+  out?: string;
+  app?: string;
+  tables?: string;
+  "ignore-columns"?: string;
+  "storage-state"?: string;
+  force?: boolean;
+  lang?: string;
+}
+
+/** `ashiato export-tests`: each verification as a Playwright test (tests/e2e/<name>.spec.ts). */
+function runExportTestsCommand(paths: string[], values: ExportTestsValues) {
+  if (!paths.length) throw new Error("Usage: ashiato export-tests <file.verify.md | folder>... [--out tests/e2e/] [--app <url>]");
+  const lang = langOption(values.lang);
+  if (values.app && !/^https?:\/\//i.test(values.app)) throw new Error(`--app takes the app's URL (http://localhost:5173), not "${values.app}"`);
+  const files = filesIn(paths, /\.verify\.md$/i, ".verify.md");
+  const toFile = values.out !== undefined && /\.[cm]?[jt]s$/i.test(values.out);
+  if (toFile && files.length > 1) throw new Error(`--out ${values.out} is one file: give a folder for ${files.length} verifications`);
+  const login = values["storage-state"] ?? (existsSync(DEFAULT_LOGIN) ? DEFAULT_LOGIN : undefined);
+  if (values["storage-state"] && !existsSync(values["storage-state"])) throw new Error(`${values["storage-state"]} doesn't exist: save a login with \`ashiato verify --auto --login\` first`);
+
+  let wrong = 0;
+  for (const path of files) {
+    const fileName = shown(path);
+    const file = parseVerifyFile(decodeText(readFileSync(path)), lang);
+    const problems = [...file.problems, ...file.actionProblems].sort((a, b) => a.line - b.line);
+    if (problems.length) {
+      for (const p of problems) console.error(`${fileName}:${p.line}: ${p.message}`);
+      console.error(`${fileName}: not exported (correct it, and check it with ashiato verify --auto)`);
+      wrong++;
+      continue;
+    }
+    if (!file.steps.some((s) => s.actions)) {
+      console.error(`${fileName}: not exported: no step has actions (\`Actions:\` / \`操作:\`), so there is nothing for a test to do`);
+      wrong++;
+      continue;
+    }
+    const out = toFile ? resolve(values.out!) : join(resolve(values.out ?? join("tests", "e2e")), basename(path).replace(/\.verify\.md$/i, ".spec.ts"));
+    if (existsSync(out) && !values.force && !readFileSync(out, "utf8").startsWith(EXPORTED_HEADER)) {
+      console.error(`${shown(out)}: kept: it isn't a file export-tests wrote (changed by hand?). Give --force to overwrite it.`);
+      wrong++;
+      continue;
+    }
+    const test = exportTest(file, {
+      fileName,
+      app: values.app,
+      tables: list(values.tables),
+      ignoreColumns: list(values["ignore-columns"]),
+      storageState: login && shown(resolve(login)),
+    });
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, test.code);
+    console.log(`Wrote ${shown(out)} (${test.automated} step(s)${test.manual.length ? `; ${test.manual.length} step(s) a person does left out as TODO: ${test.manual.join(", ")}` : ""})`);
+  }
+  if (wrong) process.exitCode = 1;
+  else console.log("Run them with: npx playwright test --workers=1 (ASHIATO_DB_URL set to the test database)");
+}
+
 interface PackValues extends DeliverValues, BrowserValues {
   tables?: string;
   pages?: string;
@@ -614,6 +673,7 @@ export async function main(argv: string[]): Promise<void> {
       tests: { type: "string" },
       code: { type: "string" },
       "page-text": { type: "boolean" },
+      force: { type: "boolean" },
       version: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -735,6 +795,7 @@ export async function main(argv: string[]): Promise<void> {
     return runPackCommand(values, dbUrl);
   }
   if (command === "verify") return runVerifyCommand(rest, values, dbUrl);
+  if (command === "export-tests") return runExportTestsCommand(rest, values);
 
   if (!dbUrl) throw new Error("--db <url> (or ASHIATO_DB_URL) is required");
   const db = await connect(dbUrl);

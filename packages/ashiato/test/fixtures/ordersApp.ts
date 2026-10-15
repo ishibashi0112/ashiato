@@ -54,6 +54,8 @@ ${rows.map((r) => `<tr><td>${r.id}</td><td>${r.customer_id === 7 ? "鈴木商事
 
 export async function startOrdersApp(db: DatabaseSync): Promise<{ url: string; server: Server; visits: string[] }> {
   const visits: string[] = [];
+  // ashiato reads from another connection (another process, in the Playwright runner): wait for its read to end
+  db.exec("PRAGMA busy_timeout = 5000");
   const server = createServer((req, res) => {
     visits.push(`${req.method} ${req.url}`);
     const html = (body: string) => {
