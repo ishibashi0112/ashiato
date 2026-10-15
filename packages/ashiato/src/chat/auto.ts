@@ -1,7 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import type { Lang } from "../export/text.js";
 import type { RowScope, StepAction } from "./actions.js";
-import { formatAria, namedNodes, parseAria, shapeAria, texts, type AriaNode } from "./aria.js";
+import { formatAria, HIDDEN, namedNodes, parseAria, shapeAria, texts, type AriaNode } from "./aria.js";
 import { appUrl } from "./browser.js";
 
 /**
@@ -125,7 +125,15 @@ export interface ActionRun {
   done: number;
   failed?: ActionFailure;
   /** The dialogs that opened, and how they were answered. */
-  dialogs: string[];
+  dialogs: DialogAnswer[];
+}
+
+export interface DialogAnswer {
+  type: string;
+  message: string;
+  /** OK, Cancel, or OK with the text typed in a prompt. */
+  accept: boolean;
+  value?: string;
 }
 
 export interface ActionFailure {
@@ -133,8 +141,16 @@ export interface ActionFailure {
   message: string;
   /** What is on the page with a similar name, as the accessibility tree names it. */
   candidates?: string[];
-  /** The page's accessibility tree when it failed (its text: the report holds the database's values anyway). */
-  screen?: string;
+  /** The page when it failed. */
+  screen?: Screen;
+  /** The message and candidates without anything the page shows (they may be the database's values), for an AI told no values. */
+  valueFree: { message: string; candidates?: string[] };
+}
+
+/** A page's accessibility tree with its text (the report holds the database's values anyway), and without what may show values. */
+export interface Screen {
+  text: string;
+  valueFree: string;
 }
 
 const TEXT = {
@@ -147,7 +163,13 @@ const TEXT = {
     notShown: (text: string) => `"${text}" was not shown.`,
     stillShown: (text: string) => `"${text}" was still shown.`,
     value: (label: string, expected: string, actual: string) => `${label} holds "${actual}", not "${expected}".`,
+    valueHidden: (label: string, expected: string) => `${label} doesn't hold "${expected}" (what it holds isn't shown).`,
     options: (list: string) => `The options are: ${list}.`,
+    noOption: (label: string, value: string) => `${label} has no option "${value}".`,
+    hiddenEl: (what: string) => `${what} is on the page but not visible (in a closed menu, tab or dialog?): open what shows it first.`,
+    disabled: (what: string) => `${what} is disabled: fill in what it needs first.`,
+    notEditable: (what: string) => `${what} can't be typed in (read-only, or not a text field).`,
+    failed: "Playwright couldn't do it (its message isn't shown: it can quote the page).",
     notSelect: (label: string) => `${label} is not a list box (<select>): click it, then click the option.`,
     timeout: (ms: number) => `(waited ${ms / 1000}s)`,
     clickable: (name: string) => `a button or link "${name}"`,
@@ -156,6 +178,8 @@ const TEXT = {
     text: (name: string) => `the text "${name}"`,
     row: (row: RowScope) => ("text" in row ? ` in the row showing "${row.text}"` : ` in the ${row.at} row`),
     theRow: (row: RowScope) => ("text" in row ? `the row showing "${row.text}"` : `the ${row.at} row`),
+    ok: "OK",
+    cancel: "Cancel",
     dialog: (type: string, message: string, answer: string) => `${type} "${message}": ${answer}`,
   },
   ja: {
@@ -167,7 +191,13 @@ const TEXT = {
     notShown: (text: string) => `「${text}」が表示されませんでした。`,
     stillShown: (text: string) => `「${text}」が表示されたままでした。`,
     value: (label: string, expected: string, actual: string) => `${label} の値が「${expected}」ではなく「${actual}」でした。`,
+    valueHidden: (label: string, expected: string) => `${label} の値が「${expected}」ではありませんでした(実際の値は表示しません)。`,
     options: (list: string) => `選択肢: ${list}`,
+    noOption: (label: string, value: string) => `${label} に選択肢「${value}」がありません。`,
+    hiddenEl: (what: string) => `${what}は画面にありますが、表示されていません(閉じたメニュー・タブ・ダイアログの中?)。先にそれを開く操作を書いてください。`,
+    disabled: (what: string) => `${what}は無効(押せない・入力できない状態)です。先に必要な入力をしてください。`,
+    notEditable: (what: string) => `${what}には入力できません(読み取り専用か、入力欄ではありません)。`,
+    failed: "Playwright で実行できませんでした(メッセージは画面の文字を含むことがあるため表示しません)。",
     notSelect: (label: string) => `${label} はリストボックス(<select>)ではありません。押して開いてから、選択肢を押してください。`,
     timeout: (ms: number) => `(${ms / 1000} 秒待ちました)`,
     clickable: (name: string) => `ボタンかリンク「${name}」`,
@@ -176,10 +206,19 @@ const TEXT = {
     text: (name: string) => `文字「${name}」`,
     row: (row: RowScope) => ("text" in row ? `(「${row.text}」の行)` : row.at === "first" ? "(最初の行)" : "(最後の行)"),
     theRow: (row: RowScope) => ("text" in row ? `「${row.text}」の行` : row.at === "first" ? "最初の行" : "最後の行"),
+    ok: "OK",
+    cancel: "キャンセル",
     dialog: (type: string, message: string, answer: string) => `${type}「${message}」: ${answer}`,
   },
 };
 type Text = (typeof TEXT)["en"];
+
+/** `confirm「取り消しますか？」: OK`, or without the message (it may quote the database's values): `confirm: OK`. */
+export function dialogText(d: DialogAnswer, lang: Lang, values = true): string {
+  const t = TEXT[lang];
+  const answer = !d.accept ? t.cancel : d.value !== undefined ? `${t.ok} (${values ? d.value : "…"})` : t.ok;
+  return values ? t.dialog(d.type, d.message, answer) : `${d.type}: ${answer}`;
+}
 
 export interface RunOptions {
   lang: Lang;
@@ -195,7 +234,7 @@ export interface RunOptions {
  */
 export class ActionRunner {
   private readonly answers: StepAction[] = [];
-  private dialogs: string[] = [];
+  private dialogs: DialogAnswer[] = [];
 
   constructor(
     private readonly page: Page,
@@ -203,10 +242,9 @@ export class ActionRunner {
   ) {
     page.on("dialog", (d) => {
       const a = this.answers.shift();
-      const t = TEXT[options.lang];
-      const answer = a?.accept === false ? (options.lang === "ja" ? "キャンセル" : "Cancel") : a?.value !== undefined ? `OK (${a.value})` : "OK";
-      this.dialogs.push(t.dialog(d.type(), d.message(), answer));
-      void (a?.accept === false ? d.dismiss() : d.accept(a?.value)).catch(() => undefined);
+      const accept = a?.accept !== false;
+      this.dialogs.push({ type: d.type(), message: d.message(), accept, ...(accept && a?.value !== undefined ? { value: a.value } : {}) });
+      void (accept ? d.accept(a?.value) : d.dismiss()).catch(() => undefined);
     });
   }
 
@@ -226,12 +264,17 @@ export class ActionRunner {
     return { done, dialogs: this.dialogs };
   }
 
-  /** The page's accessibility tree with its text, for the report. */
-  async screen(max = 4000): Promise<string | undefined> {
+  /** The page's accessibility tree, for the report. */
+  async screen(max = 4000): Promise<Screen | undefined> {
+    const nodes = await this.nodes();
+    if (!nodes) return undefined;
+    const cut = (text: string) => (text.length > max ? `${text.slice(0, max)}\n…` : text);
+    return { text: cut(formatAria(shapeAria(nodes, { text: true }))), valueFree: cut(formatAria(shapeAria(nodes))) };
+  }
+
+  private async nodes(): Promise<AriaNode[] | undefined> {
     const yaml = await this.page.locator("body").ariaSnapshot({ timeout: 2000 }).catch(() => undefined);
-    if (yaml === undefined) return undefined;
-    const text = formatAria(shapeAria(parseAria(yaml), { text: true }));
-    return text.length > max ? `${text.slice(0, max)}\n…` : text;
+    return yaml === undefined ? undefined : parseAria(yaml);
   }
 
   private get timeout() {
@@ -276,7 +319,7 @@ export class ActionRunner {
         for (;;) {
           const value = await el!.inputValue({ timeout: Math.max(1, deadline - Date.now()) });
           if (value === a.value) return;
-          if (Date.now() >= deadline) throw new Expected(t.value(a.target!, a.value!, value));
+          if (Date.now() >= deadline) throw new Expected(t.value(a.target!, a.value!, value), t.valueHidden(a.target!, a.value!));
           await page.waitForTimeout(100);
         }
       }
@@ -301,38 +344,69 @@ export class ActionRunner {
     }
   }
 
-  /** Why the action failed, in words a chat can act on, with what is on the page instead. */
+  /**
+   * Why the action failed, in words a chat can act on, with what is on the page instead. Messages are
+   * made from what the step says (its names and texts), so they hold none of the page's text unless
+   * they say so (a field's value, the options of a list box, Playwright's own message): those have a
+   * value-free version.
+   */
   private async failure(a: StepAction, e: Error, t: Text): Promise<ActionFailure> {
+    const nodes = (await this.nodes()) ?? [];
     const screen = await this.screen();
     const base = { action: a, ...(screen ? { screen } : {}) };
-    if (e instanceof Expected) return { ...base, message: e.message };
+    /** A message holding nothing from the page. */
+    const said = (message: string, more: Partial<ActionFailure> = {}): ActionFailure => ({ ...base, message, ...more, valueFree: { message } });
+    if (e instanceof Expected) return { ...base, message: e.message, valueFree: { message: e.valueFree ?? e.message } };
     const el = elementOf(this.page, a);
     const what = describe(a, t);
-    if (!el) return { ...base, message: firstLine(e.message) };
+    if (!el) return { ...base, message: firstLine(e.message), valueFree: { message: t.failed } };
     const count = await el.count().catch(() => -1);
-    if (count > 1) return { ...base, message: t.several(what, count) };
+    if (count > 1) return said(t.several(what, count));
     if (count === 0) {
-      if (a.row && "text" in a.row && (await (scopeOf(this.page, a.row) as Locator).count().catch(() => 1)) === 0) return { ...base, message: t.noRow(a.row.text) };
-      const nodes = parseAria((await this.page.locator("body").ariaSnapshot({ timeout: 2000 }).catch(() => "")) ?? "");
-      const said = a.target && !a.byText && texts(nodes).some((x) => x.trim() === a.target);
-      const hint = !said ? "" : a.verb === "click" ? ` ${t.textOnly(a.target!)}` : a.verb === "fill" || a.verb === "select" ? ` ${t.unlabelled(a.target!)}` : "";
+      if (a.row && "text" in a.row && (await (scopeOf(this.page, a.row) as Locator).count().catch(() => 1)) === 0) return said(t.noRow(a.row.text));
+      // only whether the name written is on the page as text: it is the step's own
+      const asText = a.target && !a.byText && texts(nodes).some((x) => x.trim() === a.target);
+      const hint = !asText ? "" : a.verb === "click" ? ` ${t.textOnly(a.target!)}` : a.verb === "fill" || a.verb === "select" ? ` ${t.unlabelled(a.target!)}` : "";
+      const message = `${t.notFound(what)}${hint}`;
       const candidates = similar(nodes, a);
-      return { ...base, message: `${t.notFound(what)}${hint}`, ...(candidates.length ? { candidates } : {}) };
+      const valueFree = similar(shapeAria(nodes), a).filter((c) => !c.includes(`"${HIDDEN}"`));
+      return { ...base, message, ...(candidates.length ? { candidates } : {}), valueFree: { message, ...(valueFree.length ? { candidates: valueFree } : {}) } };
     }
-    // found once, but it couldn't be done: not a select, an option that isn't there, disabled...
+    // found once, but it couldn't be done: hidden, disabled, not a select, an option that isn't there...
+    const state = await el
+      .evaluate((node) => {
+        const box = (node as HTMLElement).getBoundingClientRect?.();
+        const style = getComputedStyle(node as Element);
+        return {
+          visible: !!box && box.width > 0 && box.height > 0 && style.visibility !== "hidden",
+          disabled: (node as HTMLButtonElement).disabled === true || node.getAttribute("aria-disabled") === "true",
+          readOnly: (node as HTMLInputElement).readOnly === true,
+        };
+      })
+      .catch(() => undefined);
+    if (state && !state.visible) return said(t.hiddenEl(what));
+    if (state?.disabled) return said(t.disabled(what));
     if (a.verb === "select") {
       const options = await el
         .evaluate((node) => (node instanceof HTMLSelectElement ? [...node.options].map((o) => (o.value === o.text ? o.text : `${o.text} (${o.value})`)) : null))
         .catch(() => undefined);
-      if (options === null) return { ...base, message: t.notSelect(what) };
-      if (options) return { ...base, message: `${firstLine(e.message)} ${t.options(options.map((o) => `"${o}"`).join(", "))}` };
+      if (options === null) return said(t.notSelect(what));
+      if (options) return { ...base, message: `${t.noOption(a.target!, a.value!)} ${t.options(options.map((o) => `"${o}"`).join(", "))}`, valueFree: { message: t.noOption(a.target!, a.value!) } };
     }
-    return { ...base, message: firstLine(e.message) };
+    if (a.verb === "fill" && state?.readOnly) return said(t.notEditable(what));
+    return { ...base, message: firstLine(e.message), valueFree: { message: t.failed } };
   }
 }
 
-/** A failure the action itself reports (a text not shown, a value that differs). */
-class Expected extends Error {}
+/** A failure the action itself reports (a text not shown, a value that differs), and the same without the page's text. */
+class Expected extends Error {
+  constructor(
+    message: string,
+    readonly valueFree?: string,
+  ) {
+    super(message);
+  }
+}
 
 const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.replace(/\u001b\[[0-9;]*m/g, "").trim() ?? s;
 

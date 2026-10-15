@@ -7,7 +7,7 @@ import { localTime, zoneOf, type Lang } from "../export/text.js";
 import { matchChanges, tableProblems } from "../testing/match.js";
 import { watchedIn } from "../testing/watch.js";
 import type { StepAction } from "./actions.js";
-import type { ActionRun } from "./auto.js";
+import { dialogText, type ActionRun, type Screen } from "./auto.js";
 import { codeFence, DIALECT_NAMES, markdownCell } from "./markdown.js";
 import type { FileProblem, StepExpectation, VerifyFile, VerifyStep } from "./verifyFile.js";
 
@@ -30,7 +30,7 @@ export interface StepOutcome {
   /** The database's error (the step and the ones after it were not checked). */
   error?: string;
   /** `--auto`: what happened to the step's actions. */
-  actions?: ActionRun & { screen?: string };
+  actions?: ActionRun & { screen?: Screen };
 }
 
 export interface VerifyRun {
@@ -65,7 +65,7 @@ export interface VerifyOptions extends ReaderOptions {
 export interface AutoRunner {
   run(actions: StepAction[]): Promise<ActionRun>;
   /** The page's accessibility tree now, for the report of a step that failed. */
-  screen(): Promise<string | undefined>;
+  screen(): Promise<Screen | undefined>;
 }
 
 const TEXT = {
@@ -417,14 +417,14 @@ export function verifyReport(file: VerifyFile, run: VerifyRun, options: ReportOp
         out.push(t.failed(o.actions.failed.message), "");
         if (o.actions.failed.candidates?.length) out.push(t.candidates, ...o.actions.failed.candidates.map((c) => `- ${c}`), "");
       }
-      if (o.actions.dialogs.length) out.push(t.dialogs, ...o.actions.dialogs.map((d) => `- ${d}`), "");
+      if (o.actions.dialogs.length) out.push(t.dialogs, ...o.actions.dialogs.map((d) => `- ${dialogText(d, options.lang)}`), "");
     }
     if (o.step.expect) out.push(t.expected, ...o.step.expect.lines.map((l) => `- ${l}`), "");
     else out.push(t.noCheck, "");
     if (o.error !== undefined) out.push(t.error(o.error), "");
     if (o.problems) out.push(t.differences(o.checks ?? 1), "", codeFence(o.problems.join("\n"), "text"), "");
     if (o.diff) out.push(t.actual, "", ...changes(o.diff, t, maxRows));
-    if (o.actions?.screen) out.push(t.screen, "", codeFence(o.actions.screen, "yaml"), "");
+    if (o.actions?.screen) out.push(t.screen, "", codeFence(o.actions.screen.text, "yaml"), "");
   }
   // sections end with a blank line and start with one
   return `${out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "")}\n`;

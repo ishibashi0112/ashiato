@@ -1,11 +1,12 @@
 import type { Page } from "playwright-core";
-import { labelShape } from "../agent/text.js";
+import type { DbAdapter } from "../adapters/types.js";
+import { changesLine, labelShape } from "../agent/text.js";
 import { tableId } from "../core/diff.js";
 import type { Session, TableRef } from "../core/types.js";
 import { localTime, zoneOf, type Lang } from "../export/text.js";
-import { formatAria, parseAria, shapeAria } from "./aria.js";
+import { formatAria, HIDDEN, isIdSegment, parseAria, shapeAria } from "./aria.js";
 import { codeFence, DIALECT_NAMES } from "./markdown.js";
-import type { SchemaSection } from "./schema.js";
+import { schemaSections, type SchemaSection } from "./schema.js";
 
 /**
  * `ashiato pack`: what a chat needs to write a verification of the app (`checks/*.verify.md`) in one
@@ -52,8 +53,7 @@ export function pagePath(url: string, base?: string): string {
   } catch {
     return url;
   }
-  const id = (segment: string) =>
-    /^\d+$/.test(segment) || /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(segment) || /^[0-9a-f]{24,}$/i.test(segment) ? ":id" : segment;
+  const id = (segment: string) => (isIdSegment(segment) ? ":id" : segment);
   const path = u.pathname.split("/").map(id).join("/");
   const hash = u.hash.startsWith("#/") ? `#${u.hash.slice(1).replace(/[?].*$/, "").split("/").map(id).join("/")}` : "";
   return path + hash;
@@ -95,10 +95,13 @@ export async function crawlPages(page: Page, options: CrawlOptions): Promise<Pag
       }
       seen.add(landed);
     }
-    const tree = formatAria(shapeAria(parseAria(yaml), { text: options.pageText }));
+    // a page of one record (/orders/:id) may name it in its title and headings
+    const record = !options.pageText && /(?:^|\/):id(?:\/|$)/.test(landed);
+    const tree = formatAria(shapeAria(parseAria(yaml), { text: options.pageText, record }));
+    const title = (await page.title().catch(() => "")) || undefined;
     shots.push({
       path,
-      title: (await page.title().catch(() => "")) || undefined,
+      title: title && record ? HIDDEN : title,
       ...(landed !== path ? { redirected: landed } : {}),
       ...(status && status >= 400 ? { status } : {}),
       tree,
@@ -171,15 +174,7 @@ export function pageActions(sessions: Session[], lang: Lang): PageAction[] {
       const requests = [
         ...new Set(a.requests.map((r) => (r.kind === "http" ? `${r.method} ${pagePath(r.url ?? "")}` : `WebView2 ${r.method}`))),
       ];
-      const changes = step.diff.tables.length
-        ? step.diff.tables
-            .map((t) => {
-              const counts = [t.inserted.length && `+${t.inserted.length}`, t.updated.length && `~${t.updated.length}`, t.deleted.length && `-${t.deleted.length}`].filter(Boolean);
-              const columns = [...new Set(t.updated.flatMap((u) => u.changed))];
-              return `${tableId(t.table)} ${counts.join(" ")}${columns.length ? ` (${columns.join(", ")})` : ""}`;
-            })
-            .join(", ")
-        : none;
+      const changes = changesLine(step.diff) || none;
       const action = labelShape(step);
       const key = JSON.stringify([page, action, requests]);
       const found = byKey.get(key);
@@ -379,6 +374,73 @@ export function packMarkdown(parts: PackParts): Pack {
   while (!fits() && actions.length) left.actions.unshift(actions.pop()!.name);
   while (!fits() && pages.length > 1) left.pages.unshift(pages.pop()!.name);
   return { markdown: assemble(pages, actions, tables, tests, code, leftNote()), left };
+}
+
+export interface PackInput {
+  lang: Lang;
+  /** The app's URL: its pages are read in the browser `browser` opens. */
+  app?: string;
+  browser?: () => Promise<{ page: Page; close(): Promise<void> }>;
+  pages?: string[];
+  maxPages?: number;
+  pageText?: boolean;
+  /** The database whose tables are described. */
+  db?: DbAdapter;
+  tables?: string[];
+  sessions: Session[];
+  tests: ExistingTests[];
+  code?: { name: string; text: string };
+  maxChars?: number;
+  log?: (message: string) => void;
+}
+
+export interface PackResult {
+  pack: Pack;
+  pages: PageShot[];
+  actions: PageAction[];
+  tables: SchemaSection[];
+  /** Tables whose definitions couldn't be read. */
+  unreadable: string[];
+}
+
+/** Reads the pages, the tables and the recordings, and puts them together (`ashiato pack`, and the MCP tool `pack`). */
+export async function makePack(input: PackInput): Promise<PackResult> {
+  let pages: PageShot[] = [];
+  if (input.app) {
+    if (!input.browser) throw new Error("No browser to read the pages in");
+    const driven = await input.browser();
+    try {
+      input.log?.(`Reading the pages of ${input.app}${input.pages?.length ? "" : " (following its links)"}:`);
+      pages = await crawlPages(driven.page, { app: input.app, pages: input.pages, maxPages: input.maxPages, pageText: input.pageText, log: input.log });
+    } finally {
+      await driven.close().catch(() => undefined);
+    }
+  }
+  let tables: SchemaSection[] = [];
+  let unreadable: string[] = [];
+  if (input.db) ({ sections: tables, unreadable } = await schemaSections(input.db, { tables: input.tables, views: false, lang: input.lang }));
+  const actions = pageActions(input.sessions, input.lang);
+  const pack = packMarkdown({
+    lang: input.lang,
+    app: input.app,
+    dialect: input.db?.dialect ?? input.sessions[0]?.dialect,
+    pages,
+    pageText: input.pageText,
+    actions,
+    recordings: input.sessions.length,
+    tables,
+    tests: input.tests,
+    code: input.code,
+    maxChars: input.maxChars,
+  });
+  return { pack, pages, actions, tables, unreadable };
+}
+
+/** What `left` says, in a line: `2 page(s), recorded actions`. Empty when nothing was left out. */
+export function leftOut(left: Pack["left"]): string {
+  return [left.pages.length && `${left.pages.length} page(s)`, left.actions.length && "recorded actions", left.tables.length && `${left.tables.length} table(s)`, left.tests && "tests", left.code && "code"]
+    .filter(Boolean)
+    .join(", ");
 }
 
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");

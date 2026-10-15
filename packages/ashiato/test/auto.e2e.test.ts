@@ -2,11 +2,14 @@
  * `verify --auto` and `pack` in a real browser, against a small order app writing to SQLite.
  * Needs a Chromium for Playwright.
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import type { DbAdapter } from "../src/adapters/types.js";
+import { agentTools } from "../src/agent/tools.js";
 import { ActionRunner } from "../src/chat/auto.js";
 import { openBrowser, type Driven } from "../src/chat/browser.js";
 import { crawlPages, packMarkdown } from "../src/chat/pack.js";
@@ -102,19 +105,22 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
       settleMs: 100,
       ask: async (p) => (prompts.push(p), "s"),
       log: () => undefined,
-      auto: { run: (a) => runner.run(a), screen: () => runner.screen() },
+      auto: runner,
     });
     expect(run.outcomes.map((o) => o.verdict)).toEqual(["ok", "ok", "ng", "ng", "skipped"]);
     // only the step without actions asked the person
     expect(prompts).toHaveLength(1);
     const [, cancel, wrong, short] = run.outcomes;
-    expect(cancel!.actions!.dialogs).toEqual(["confirm「取り消しますか？」: OK"]);
+    expect(cancel!.actions!.dialogs).toEqual([{ type: "confirm", message: "取り消しますか？", accept: true }]);
     expect(wrong!.actions!.done).toBe(2);
     expect(wrong!.actions!.failed!.message).toBe("ボタンかリンク「保存」が画面に見つかりません。");
     expect(wrong!.actions!.failed!.candidates).toContain('button "登録"');
     // the app said no: the text expected wasn't shown, and the page shows what it said instead
     expect(short!.actions!.failed!.message).toMatch(/^「登録しました」が表示されませんでした。/);
-    expect(short!.actions!.screen).toContain('status: 在庫が足りません');
+    expect(short!.actions!.screen!.text).toContain("status: 在庫が足りません");
+    // without the page's text, for an AI told no values
+    expect(short!.actions!.screen!.valueFree).toContain("status: …");
+    expect(wrong!.actions!.failed!.valueFree).toEqual({ message: "ボタンかリンク「保存」が画面に見つかりません。", candidates: wrong!.actions!.failed!.candidates });
 
     const md = verifyReport(file, run, { fileName: "checks/受注.verify.md", dialect: "sqlite", lang: "ja" });
     expect(md).toContain("`checks/受注.verify.md` の手順の操作を `ashiato verify --auto` がブラウザで(Playwright で)実行し");
@@ -161,4 +167,98 @@ describe.skipIf(!canRun)("verify --auto in a real browser", () => {
     expect(pack.markdown).toContain("### /orders/new — 新規受注\n\n```yaml\n- navigation:");
     expect(pack.markdown).toContain("記録がまだありません。");
   }, 60_000);
+});
+
+describe.skipIf(!canRun)("MCP tools pack and verify_auto", () => {
+  const app = createAppDb();
+  let server: Server;
+  let url: string;
+  const dir = mkdtempSync(join(tmpdir(), "ashiato-mcp-auto-"));
+  const tools = (values = false) => {
+    const agent = agentTools({ db: `sqlite:${app.file}`, shareValues: values, out: dir, port: false });
+    const call = (name: string, args: Record<string, unknown>) => agent.tools.find((t) => t.name === name)!.run(args);
+    return { agent, call };
+  };
+  beforeAll(async () => {
+    ({ server, url } = await startOrdersApp(app.db));
+    app.db.exec("INSERT INTO orders (customer_id, qty, updated_at) VALUES (8, 2, 'x')");
+  });
+  afterAll(() => new Promise((r) => server?.close(r)));
+
+  it("gives an agent the material without the database's values", async () => {
+    const { agent, call } = tools();
+    try {
+      const pack = await call("pack", { app: url, lang: "ja", tests: dir });
+      expect(pack).toMatch(/^3 page\(s\), 0 recorded action\(s\) from \d+ recording\(s\), 3 table\(s\)\.\nYou are an agent: write each verification to checks\/<name>\.verify\.md yourself/);
+      expect(pack).toContain("### /orders/new — 新規受注");
+      expect(pack).toContain("## テーブル定義");
+      // (the instructions' example has a customer of its own)
+      expect(pack).not.toMatch(/田中|ようこそ/);
+      await expect(call("pack", { app: url, page_text: true })).rejects.toThrow("page_text needs the server started with --share-values");
+      expect(agent.tools.find((t) => t.name === "pack")!.inputSchema.properties).not.toHaveProperty("page_text");
+    } finally {
+      await agent.close();
+    }
+  }, 60_000);
+
+  it("checks verifications and says what failed without the database's values", async () => {
+    const file = join(dir, "受注.verify.md");
+    writeFileSync(
+      file,
+      `# 受注
+
+## 1. 登録する
+
+操作:
+- 開く: /orders/new
+- 選ぶ: 得意先 = 田中物産
+- 入力: 数量 = 3
+- 押す: 登録
+
+期待する DB の変化:
+- orders: 追加 1 行 (customer_id=8, qty=4)
+- stock: 更新 1 行 (item_id=3) → (qty-=3)
+
+## 2. 選択肢を間違える
+
+操作:
+- 選ぶ: 得意先 = 佐藤工業
+
+期待する DB の変化:
+- 変化なし
+
+## 3. 人が行う
+
+バッチを流す
+`,
+    );
+    const { agent, call } = tools();
+    try {
+      const out = join(dir, "report.md");
+      const summary = await call("verify_auto", { files: [file], app: url, lang: "ja", out });
+      expect(summary).toContain("受注.verify.md: NG 2, 飛ばした 1");
+      expect(summary).toContain("1. 登録する: NG\n  actions: ✓ 開く: /orders/new | ✓ 選ぶ: 得意先 = 田中物産 | ✓ 入力: 数量 = 3 | ✓ 押す: 登録\n  changed: orders +1, stock ~1 (qty)");
+      expect(summary).toContain("  differences:\n    orders: 1 inserted row found, but not the expected ones\n");
+      expect(summary).toContain("qty: expected 4, got another value");
+      expect(summary).toContain("2. 選択肢を間違える: NG\n  actions: ✗ 選ぶ: 得意先 = 佐藤工業\n  failed: 得意先 に選択肢「佐藤工業」がありません。");
+      expect(summary).toContain("3. 人が行う: 飛ばした (no actions: a person does this step)");
+      expect(summary).toContain(`Report (with the rows' values, for the person): ${out}`);
+      // the options of the list box and the rows found are the database's values: not in the summary (the step's own words are)
+      expect(summary.replace(/田中物産/g, "")).not.toMatch(/鈴木|田中/);
+      expect(summary).not.toContain("updated_at");
+      const report = readFileSync(out, "utf8");
+      expect(report).toContain('選択肢: "鈴木商事 (7)", "田中物産 (8)"');
+      expect(report).toContain("qty: expected 4, got 3");
+    } finally {
+      await agent.close();
+    }
+    const shared = tools(true);
+    try {
+      const report = await shared.call("verify_auto", { files: [file], app: url, lang: "ja", out: join(dir, "shared.md") });
+      expect(report).toContain("# 動作検証の結果: 受注");
+      expect(report).toContain('選択肢: "鈴木商事 (7)", "田中物産 (8)"');
+    } finally {
+      await shared.agent.close();
+    }
+  }, 90_000);
 });

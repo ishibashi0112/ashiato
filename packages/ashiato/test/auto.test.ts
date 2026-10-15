@@ -146,6 +146,39 @@ describe("accessibility trees", () => {
     expect(formatAria(shapeAria(parseAria(YAML), { text: true }))).toContain('- cell "鈴木商事"');
   });
 
+  it("hides links to one record, and the headings of a record's page", () => {
+    const yaml = `- heading "受注 1042 鈴木商事" [level=1]
+- list:
+  - listitem:
+    - link "鈴木商事":
+      - /url: /customers/12
+  - listitem:
+    - link "田中物産":
+      - /url: /customers?customer_id=13
+  - listitem:
+    - link "受注一覧":
+      - /url: /orders
+  - listitem:
+    - link "明細":
+      - /url: "#/orders/1042/lines"`;
+    const shaped = formatAria(shapeAria(parseAria(yaml), { record: true }));
+    expect(shaped).toBe(`- heading "…" [level=1]
+- list:
+  - listitem:
+    - link "…":
+      - /url: /customers/:id
+  - listitem:
+    - link "…":
+      - /url: /customers
+  - listitem:
+    - link "受注一覧":
+      - /url: /orders
+  - listitem:
+    - link "…":
+      - /url: "#/orders/:id/lines"`);
+    expect(formatAria(shapeAria(parseAria(yaml)))).toContain('- heading "受注 1042 鈴木商事" [level=1]');
+  });
+
   it("measures how alike names are", () => {
     expect(likeness("登録", "登録")).toBe(1);
     expect(likeness("ＯＫ", "ok")).toBe(1);

@@ -4,7 +4,7 @@
  * them: URL queries, the text of what was clicked (a cell, a link) and the app's and database's error messages.
  */
 import { countChanges, tableId } from "../core/diff.js";
-import type { ActionInfo, JsonValue, RequestInfo, Row, Step, TableDiff } from "../core/types.js";
+import type { ActionInfo, Diff, JsonValue, RequestInfo, Row, Step, TableDiff } from "../core/types.js";
 
 export interface TextOptions {
   /** Show the rows' values (default: only tables, columns and counts). */
@@ -130,4 +130,50 @@ export function stepShape(step: Step) {
     ...(step.removedTables ? { removedTables: step.removedTables.map(tableId) } : {}),
     ...(step.skipped ? { skipped: step.skipped.map((s) => ({ table: tableId(s.table), reason: reasonShape(s.reason) })) } : {}),
   };
+}
+
+/** `orders +1, stock ~1 (qty)`: what changed, in counts and the columns updated (empty when nothing did). */
+export function changesLine(diff: Diff): string {
+  return diff.tables
+    .map((t) => {
+      const counts = [t.inserted.length && `+${t.inserted.length}`, t.updated.length && `~${t.updated.length}`, t.deleted.length && `-${t.deleted.length}`].filter(Boolean);
+      const columns = [...new Set(t.updated.flatMap((u) => u.changed))];
+      return `${tableId(t.table)} ${counts.join(" ")}${columns.length ? ` (${columns.join(", ")})` : ""}`;
+    })
+    .join(", ");
+}
+
+/**
+ * How changes differ from the expected ones (`matchChanges`' problems) without the rows' values:
+ * the lines that say which table and how many rows, the expected patterns (written by whoever
+ * expected them) and which columns differ are kept; the rows found and their values are left out.
+ */
+export function problemShape(problem: string): string {
+  const [first = "", ...rest] = problem.split("\n");
+  const out = [first.replace(/could not be read: .*$/, "could not be read (the database's message is not shown)").replace(/:$/, "")];
+  let unexpected: { at: number; n: number } | undefined;
+  for (const line of rest) {
+    const indent = /^\s*/.exec(line)![0];
+    const text = line.slice(indent.length);
+    if (unexpected && indent.length > unexpected.at) {
+      unexpected.n++;
+      continue;
+    }
+    unexpected = undefined;
+    if (/^expected .*: (?:no row matches|not found|the rows it fits are taken by the other rows expected)$/.test(text)) out.push(line);
+    else if (/^not expected:/.test(text)) {
+      unexpected = { at: indent.length, n: 0 };
+      out.push(`${indent}not expected: (rows not shown)`);
+    } else {
+      // `qty: expected 3, got 2`, `set qty: expected +10, got 50 → 45`, `where id: ...`, `qty also changed: 1 → 2`
+      const differs = /^((?:where |set )?[^:\s][^:]*?): expected (.*?), got /.exec(text);
+      const also = /^([^:\s][^:]*?) also changed: /.exec(text);
+      const column = /^no column .*$/.exec(text);
+      if (differs) out.push(`${indent}${differs[1]}: expected ${differs[2]}, got another value`);
+      else if (also) out.push(`${indent}${also[1]} also changed`);
+      else if (column) out.push(line);
+      // the closest row, rows found: left out
+    }
+  }
+  return out.join("\n");
 }

@@ -9,8 +9,9 @@ import { serveMcp } from "../agent/mcp.js";
 import { writeClipboard } from "../chat/clipboard.js";
 import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
-import { crawlPages, packMarkdown, pageActions, testTitles, type ExistingTests, type PageShot } from "../chat/pack.js";
-import { schemaMarkdown, schemaSections, type SchemaSection } from "../chat/schema.js";
+import { leftOut, makePack, type PackResult } from "../chat/pack.js";
+import { existingTests, filesIn, readSessions } from "../chat/files.js";
+import { schemaMarkdown } from "../chat/schema.js";
 import { ActionRunner } from "../chat/auto.js";
 import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
 import { EXPORTED_HEADER, exportTest } from "../chat/exportTests.js";
@@ -241,23 +242,6 @@ interface VerifyValues extends DeliverValues, BrowserValues {
   auto?: boolean;
 }
 
-/** Files named, or the files of a folder whose names end with `suffix` (by name). */
-function filesIn(paths: string[], suffix: RegExp, what: string): string[] {
-  const files: string[] = [];
-  for (const p of paths) {
-    const path = resolve(p);
-    if (statSync(path).isDirectory()) {
-      const inFolder = readdirSync(path)
-        .filter((f) => suffix.test(f))
-        .sort()
-        .map((f) => join(path, f));
-      if (!inFolder.length) throw new Error(`No ${what} files in ${p}`);
-      files.push(...inFolder);
-    } else files.push(path);
-  }
-  return files;
-}
-
 /** The browser options of `pack` and `verify --auto`, with the login to use: `--login` saves one first (the person logs in). */
 async function browserOptions(values: BrowserValues, ask: (prompt: string) => Promise<string | null>): Promise<BrowserOptions> {
   const options: BrowserOptions = { app: values.app, headed: values.headed, browser: values.browser, cdp: values.cdp };
@@ -324,8 +308,7 @@ async function runVerifyCommand(paths: string[], values: VerifyValues, dbUrl?: s
     if (values.auto) {
       const options = await browserOptions(values, input.ask);
       driven = await openBrowser("verify --auto", options);
-      const runner = new ActionRunner(driven.page, { lang, app: values.app });
-      auto = { run: (actions) => runner.run(actions), screen: () => runner.screen() };
+      auto = new ActionRunner(driven.page, { lang, app: values.app });
     }
     const reports: string[] = [];
     const runs: { fileName: string; run: VerifyRun }[] = [];
@@ -451,68 +434,6 @@ interface PackValues extends DeliverValues, BrowserValues {
   lang?: string;
 }
 
-/** Saved sessions: the files named, or the newest ones of a folder (default .ashiato/sessions, when there is one). */
-function readSessions(given: string | undefined): Session[] {
-  const paths = list(given) ?? (existsSync(".ashiato/sessions") ? [".ashiato/sessions"] : []);
-  const files: string[] = [];
-  for (const p of paths) {
-    const path = resolve(p);
-    if (!existsSync(path)) throw new Error(`--sessions: ${p} doesn't exist`);
-    if (statSync(path).isDirectory()) {
-      const inFolder = readdirSync(path)
-        .filter((f) => /\.json$/i.test(f) && !/\.tmp$/i.test(f))
-        .sort()
-        .slice(-50)
-        .map((f) => join(path, f));
-      files.push(...inFolder);
-    } else files.push(path);
-  }
-  return files.flatMap((f) => {
-    try {
-      return [loadSession(f)];
-    } catch {
-      // not a session (another JSON file in the folder)
-      return [];
-    }
-  });
-}
-
-/** The titles of Playwright tests (`*.spec.*`) and verifications (`*.verify.md`) in the folders given, or in tests/, e2e/ and checks/. */
-function existingTests(given: string | undefined, lang: Lang): ExistingTests[] {
-  const roots = list(given) ?? ["tests", "e2e", "test", "playwright", "checks"].filter((d) => existsSync(d));
-  const out: ExistingTests[] = [];
-  const walk = (dir: string, depth: number) => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir).sort();
-    } catch {
-      return;
-    }
-    for (const name of entries) {
-      if (name === "node_modules" || name.startsWith(".")) continue;
-      const path = join(dir, name);
-      const stat = statSync(path, { throwIfNoEntry: false });
-      if (stat?.isDirectory()) {
-        if (depth < 6) walk(path, depth + 1);
-        continue;
-      }
-      if (/\.verify\.md$/i.test(name)) {
-        const file = parseVerifyFile(decodeText(readFileSync(path)), lang);
-        out.push({ file: shown(path), titles: [file.title || name, ...file.steps.map((s) => s.title)] });
-      } else if (/\.spec\.[cm]?[jt]sx?$/i.test(name)) {
-        const titles = testTitles(readFileSync(path, "utf8"));
-        if (titles.length) out.push({ file: shown(path), titles });
-      }
-    }
-  };
-  for (const root of roots) {
-    const path = resolve(root);
-    if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) walk(path, 0);
-    else if (given) throw new Error(`--tests: ${root} is not a folder`);
-  }
-  return out;
-}
-
 async function runPackCommand(values: PackValues, dbUrl?: string) {
   const lang = langOption(values.lang);
   const maxChars = Number(values["max-chars"] ?? PASTE_LIMIT);
@@ -524,56 +445,39 @@ async function runPackCommand(values: PackValues, dbUrl?: string) {
     if (values[option] !== undefined && !values.app) throw new Error(`--${option} needs --app <url> (the pages are read in a browser)`);
   }
   if (dbUrl && !dialectOf(dbUrl)) throw new Error(`Unsupported database URL: ${dbUrl.split(":")[0]}: (use sqlite:, mssql:, oracle:, postgres: or mysql:)`);
-  const sessions = readSessions(values.sessions);
+  const sessions = readSessions(list(values.sessions));
   if (!values.app && !dbUrl && !sessions.length) throw new Error("Nothing to pack: give --app <url> (the pages), --db <url> (the tables) and / or recordings (.ashiato/sessions)");
   const info = infoFor(values);
-
-  let pages: PageShot[] = [];
-  if (values.app) {
-    const input = lineReader();
-    let driven: Driven | undefined;
-    try {
-      const options = await browserOptions(values, input.ask);
-      driven = await openBrowser("ashiato pack", options);
-      info(`Reading the pages of ${values.app}${values.pages ? "" : " (following its links)"}:`);
-      pages = await crawlPages(driven.page, { app: values.app, pages: list(values.pages), maxPages, pageText: values["page-text"], log: info });
-    } finally {
-      input.close();
-      await driven?.close().catch(() => undefined);
-    }
-    const redirected = pages.filter((p) => p.redirected);
-    if (redirected.length && redirected.length === pages.length - 1) info(`Note: the pages went to ${redirected[0]!.redirected}: if that is a login page, log in first with --login.`);
-  }
-
-  let tables: SchemaSection[] = [];
-  let dialect: string | undefined;
-  if (dbUrl) {
-    const db = await connect(dbUrl);
-    try {
-      dialect = db.dialect;
-      const read = await schemaSections(db, { tables: list(values.tables), views: false, lang });
-      tables = read.sections;
-      if (read.unreadable.length) info(`Could not read: ${read.unreadable.join(", ")}`);
-    } finally {
-      await db.close();
-    }
-  } else dialect = sessions[0]?.dialect;
-
+  const tests = existingTests(list(values.tests), lang, shown);
   const code = values.code ? { name: basename(values.code), text: decodeText(readFileSync(resolve(values.code))) } : undefined;
-  const actions = pageActions(sessions, lang);
-  const pack = packMarkdown({
-    lang,
-    app: values.app,
-    dialect,
-    pages,
-    pageText: values["page-text"],
-    actions,
-    recordings: sessions.length,
-    tables,
-    tests: existingTests(values.tests, lang),
-    code,
-    maxChars,
-  });
+
+  const input = lineReader();
+  const db = dbUrl ? await connect(dbUrl) : undefined;
+  let made: PackResult;
+  try {
+    made = await makePack({
+      lang,
+      app: values.app,
+      browser: async () => openBrowser("ashiato pack", await browserOptions(values, input.ask)),
+      pages: list(values.pages),
+      maxPages,
+      pageText: values["page-text"],
+      db,
+      tables: list(values.tables),
+      sessions,
+      tests,
+      code,
+      maxChars,
+      log: info,
+    });
+  } finally {
+    input.close();
+    await db?.close();
+  }
+  const { pack, pages, actions, tables, unreadable } = made;
+  if (unreadable.length) info(`Could not read: ${unreadable.join(", ")}`);
+  const redirected = pages.filter((p) => p.redirected);
+  if (redirected.length && redirected.length === pages.length - 1) info(`Note: the pages went to ${redirected[0]!.redirected}: if that is a login page, log in first with --login.`);
 
   const out = values.out === "-" ? undefined : resolve(values.out ?? join("docs", "ashiato", "pack.md"));
   if (out) {
@@ -584,11 +488,11 @@ async function runPackCommand(values: PackValues, dbUrl?: string) {
     `${out ? `Wrote ${shown(out)}` : "Packed"}: ${pages.length} page(s), ${actions.length} recorded action(s) from ${sessions.length} recording(s), ${tables.length} table(s); ${pack.markdown.length.toLocaleString("en-US")} characters.`,
   );
   if (values["page-text"]) info("Note: --page-text keeps the pages' text, which may show the database's values: check that your company allows pasting them into the chat.");
-  const { pages: leftPages, actions: leftActions, tables: leftTables, tests: leftTests, code: leftCode } = pack.left;
-  if (leftPages.length || leftActions.length || leftTables.length || leftTests || leftCode) {
-    info(`Left out to stay within --max-chars ${maxChars}: ${[leftPages.length && `${leftPages.length} page(s)`, leftActions.length && "recorded actions", leftTables.length && `${leftTables.length} table(s)`, leftTests && "tests", leftCode && "code"].filter(Boolean).join(", ")}.`);
-    if (leftPages.length) info(`Make another pack of the rest and paste it after this one: ashiato pack --app ${values.app} --pages ${leftPages.join(",")}`);
-    else if (leftTables.length) info("Pick the tables with --tables to put the ones that matter in.");
+  const left = leftOut(pack.left);
+  if (left) {
+    info(`Left out to stay within --max-chars ${maxChars}: ${left}.`);
+    if (pack.left.pages.length) info(`Make another pack of the rest and paste it after this one: ashiato pack --app ${values.app} --pages ${pack.left.pages.join(",")}`);
+    else if (pack.left.tables.length) info("Pick the tables with --tables to put the ones that matter in.");
   }
   if (values.out === "-") return deliverReport(pack.markdown, "the pack", values, "lower --max-chars");
   if (values["no-clip"]) return;
