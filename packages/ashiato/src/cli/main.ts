@@ -45,7 +45,8 @@ Usage:
   ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
   ashiato verify <file.verify.md | folder>... --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
                  [--auto --app <url> [--login] [--storage-state <file>] [--headed] [--cdp <url>]]
-  ashiato pack [--app <url>] [--db <url>] [--pages /a,/b] [--sessions <folder>] [--tests <folder>] [--code <file>] [--out <file>] [--max-chars 100000]
+  ashiato pack [--app <url> [--login] [--storage-state <file>] [--page-text]] [--db <url>] [--pages /a,/b] [--sessions <folder>]
+               [--tests <folder>] [--code <file>] [--out <file>] [--max-chars 100000]
   ashiato export-tests <file.verify.md | folder>... [--out tests/e2e/] [--app <url>] [--ignore-columns c] [--force]
 
 Options:

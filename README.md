@@ -187,6 +187,8 @@ Sessions are saved in `--out` (default `.ashiato/sessions`), and relative paths 
 | `stop_recording` | Saves the session file |
 | `generate_test` | Writes a Playwright test from the recording (see above) |
 | `export_evidence` | Writes Excel / PDF / HTML evidence |
+| `pack` | Material for writing verifications of the app: each page's accessibility tree, what recorded actions changed, table definitions (see below) |
+| `verify_auto` | Runs verifications (`checks/*.verify.md`) in a browser and compares what changed (see below) |
 
 **Row values stay with you by default.** What the MCP server answers goes to the AI, and an AI in the cloud would receive your data. Unless the server is started with `--share-values`, the AI sees table names, column names, counts and which columns changed, but no row values, no URL queries, no text of what was clicked other than buttons' captions and text fields' labels (a link, a cell, a checkbox's label or a row made clickable can show data), and no error messages of the app or the database. Generated tests and evidence are written to files and only their paths are returned. ashiato itself sends nothing anywhere.
 
@@ -250,6 +252,53 @@ Expected changes:
 - Values are compared as a person reads them: `10` is `10.00`, `0001` is not `1`, `1` / `0` are true / false for a bit column, trailing spaces don't count (`CHAR` columns), a date (`2026-10-13`) is any time that day, `NULL` is NULL, and `'...'` quotes a value with commas or parentheses. Columns ignored with `--ignore-columns` never count as changed.
 - If the file can't be read as steps, or names a table that isn't there, nothing is checked and what to correct is copied instead (to paste back into the chat).
 - The results hold the changed rows' values, like `query`'s.
+
+## End-to-end checks from an AI chat
+
+The chat can also write the steps' actions, for `verify --auto` to do them in a browser with Playwright; the steps that pass become Playwright tests. One round trip:
+
+```sh
+npx ashiato pack --app http://localhost:5173 --db <url>          # docs/ashiato/pack.md, copied: paste it into the chat
+# save the chat's files as checks/*.verify.md
+npx ashiato verify checks/ --db <url> --auto --app http://localhost:5173   # results copied: paste them back, save the fixes, again
+npx ashiato export-tests checks/ --out tests/e2e/                # Playwright tests with expectDbChanges
+```
+
+**`pack`** puts what the chat needs in one text (up to `--max-chars`, 100,000 by default; the later parts are left out first):
+
+1. What to write and how: one use case per file, actions only from names on the pages, a `SELECT` to find the values a step needs (you run it with `query` and paste the results), questions instead of guesses.
+2. Each page's accessibility tree, read in a browser following the app's links (`--pages /orders,/orders/new` names them, `--max-pages` caps them). Buttons' and fields' names are the app's wording; **text that may show the database's values is replaced with `…`**: cells, options, fields' values, links to records, and the headings of pages of one record (`/orders/:id`). Long tables keep their first rows and last two. `--page-text` keeps the text, for a test database you may paste. Links that look like logging out, deleting or downloading are not followed.
+3. Which recorded actions changed which tables (`.ashiato/sessions`, from `ashiato record` with the Vite plugin): per page, the action, its requests and counts with the changed columns (`orders +1, stock ~1 (qty↓)`), no values. If the recordings ignored columns (`--ignore-columns`), it says so, so that the chat leaves them out too: run `verify` with the same option.
+4. The table definitions (as `schema`), the tests there are already (titles of `*.spec.ts` / `*.verify.md`), and `--code repomix-output.xml` at the end if you like.
+
+Apps that need a login: `--login` opens a browser to log in once and saves it to `.ashiato/login.json` (cookies: keep it out of version control); `pack`, `verify --auto` and the exported tests use it.
+
+**`verify --auto`** does the actions written under `Actions:` (`操作:`) in each step, waits for the database to settle, and compares what changed as `verify` does. Steps without actions are left to you, in the same file (a WinForms screen, a batch).
+
+```markdown
+## 1. Enter an order
+
+Actions:
+- open: /orders/new
+- select: Customer = Suzuki Trading
+- fill: spinbutton = 3 (row "A001")
+- click: Save
+- expect: "Saved" is shown
+
+Expected changes:
+- ORDERS: inserted 1 row (CUSTOMER_CODE=C001, QTY=3)
+- STOCK: updated 1 row (ITEM_CODE=A001) → (QTY-=3, ...)
+```
+
+- Verbs: `open`, `fill`, `select`, `check` / `uncheck`, `click`, `press` (a key), `wait` / `expect` (`"text" is shown` / `is not shown`, or a field's value: `Quantity = 3`), `dialog` (how to answer the next `confirm` / `prompt`: `Cancel`, or the text to type; dialogs are answered OK otherwise). Japanese verbs (`開く`, `入力`, `選ぶ`, `押す`, …) work too.
+- Elements are named exactly as the accessibility tree names them: a button or link by its name, a field by its label; no CSS or XPath. A field without a name is named by its role (`spinbutton`, `combobox`, `textbox`, `checkbox`, …) when it is the only one of its kind in the page or the row. `(row "1042")` looks in the table row showing that text, `(first row)` / `(last row)` in the first / last row that isn't a header.
+- When an action fails, the results say why (no such name, several, hidden, disabled, not a select…) with the names on the page like the one written, and the page's tree at that moment; for an NG step, the expected changes, how they differ, and the rows that changed. Paste them back: the chat corrects the lines.
+- The results hold the changed rows' values and the page's text, like `query`'s: use a test database.
+- `--headed` shows the browser; `--cdp http://127.0.0.1:9222` uses a browser that is already running (a WebView2 app started with `--remote-debugging-port`).
+
+**`export-tests`** writes each verification as a Playwright test (`tests/e2e/<name>.spec.ts`): one `test.step` per step, its actions found the same way `verify --auto` finds them, and `expectDbChanges(action, [...lines])`, which takes the expected-changes lines as written. Steps a person does become `TODO` comments. It overwrites only files it wrote (`--force` for others). Run the tests with `ASHIATO_DB_URL` set and `--workers=1`, from the state the steps start from.
+
+**For AI agents.** The MCP server has the same two as tools: `pack` returns the text (with `…` for values unless started with `--share-values`; `page_text` is only offered then), and `verify_auto` writes the full report to a file and, without `--share-values`, returns a summary without values: verdicts, the failed action and why, the names on the page like it, the page's tree with values hidden, and counts and columns of what changed.
 
 ## Large tables
 
@@ -338,7 +387,7 @@ Other web pages open in your browser can call `POST /api/checkpoint` and `POST /
 4. ✅ Faster checkpoints for large tables: re-read only the buckets whose checksum changed (`xmin`, `rowversion`, `ORA_ROWSCN`, row hashes)
 5. ✅ Evidence export (Excel / PDF) with screenshots of each step
 6. ✅ `expectDbChanges()` for Playwright, tests generated from recordings, CLI / MCP server for AI agents
-7. ⬜ E2E tests from an AI chat: `pack` writes what the chat needs (each page's accessibility tree, page → table mapping, table definitions), `verify --auto` runs the chat's steps with Playwright, `export-tests` writes the stable ones as Playwright tests ([concept, Japanese](docs/e2e-from-chat.ja.md))
+7. ✅ E2E tests from an AI chat: `pack` writes what the chat needs (each page's accessibility tree, page → table mapping, table definitions), `verify --auto` runs the chat's steps with Playwright, `export-tests` writes the stable ones as Playwright tests ([concept, Japanese](docs/e2e-from-chat.ja.md))
 
 ## Development
 
@@ -503,6 +552,8 @@ npx ashiato mcp --recorder http://127.0.0.1:4100   # 起動中の ashiato record
 | `stop_recording` | セッションファイルを保存します |
 | `generate_test` | 記録から Playwright のテストを書き出します(上記) |
 | `export_evidence` | Excel / PDF / HTML の証跡を書き出します |
+| `pack` | 動作検証の手順を書くための材料:各画面のアクセシビリティ木・記録した操作で変わった表・テーブル定義(下記) |
+| `verify_auto` | 動作検証の手順(`checks/*.verify.md`)をブラウザで実行し、DBの変化を照合します(下記) |
 
 **行の値は既定では手元に残ります。** MCPサーバーの応答はAIに渡り、クラウドのAIならデータが社外に出ます。`--share-values` を付けて起動しない限り、AIに見えるのはテーブル名・列名・件数・どの列が変わったかだけで、行の値・URLのクエリ・クリックした要素の文字(ボタンの表記と入力欄のラベル以外。リンク・セル・チェックボックスのラベル・クリックできる行はデータを表示していることがあるため)・アプリやDBのエラーメッセージは渡しません。生成したテストと証跡はファイルに書き出し、AIにはその場所だけを返します。ashiato 自身はどこにも何も送りません。
 
@@ -567,6 +618,53 @@ HAVING o.total <> SUM(l.qty * l.price);
 - ファイルが手順として読めないときや、ない表を書いているときは、何も照合せず、直すべきことをクリップボードに入れます(チャットに貼り返します)。
 - 結果には、`query` と同じく、変わった行の値が入ります。
 
+### AIチャットから E2E テスト
+
+チャットに手順の「操作」まで書いてもらうと、`verify --auto` がそれを Playwright でブラウザ操作して実行します。通った手順は Playwright のテストにできます。1 周の流れ:
+
+```sh
+npx ashiato pack --app http://localhost:5173 --db <url>          # docs/ashiato/pack.md に書き、クリップボードへ。チャットに貼る
+# チャットが出したファイルを checks/*.verify.md に保存
+npx ashiato verify checks/ --db <url> --auto --app http://localhost:5173   # 結果をチャットに貼り返し、直ったファイルを保存して、もう一度
+npx ashiato export-tests checks/ --out tests/e2e/                # expectDbChanges 付きの Playwright テスト
+```
+
+**`pack`** は、チャットに要るものを 1 つのテキストにまとめます(`--max-chars` まで。既定 10 万文字。後ろの部分から削ります)。
+
+1. 何をどう書くか:1 ユースケース 1 ファイル、操作は画面にある名前だけで書く、手順に要る値は探す `SELECT` を書く(人が `query` で実行して貼る)、分からないことは推測せず質問にする
+2. 各画面のアクセシビリティ木:ブラウザでアプリのリンクをたどって読みます(`--pages /orders,/orders/new` で指定、`--max-pages` で上限)。ボタンや入力欄の名前はアプリの文言なのでそのまま入れ、**DB の値が出ている可能性のある文字は `…` に置き換えます**(セル、選択肢、入力欄の値、1 件のデータへのリンク、`/orders/:id` のような 1 件の画面の見出し)。長い表は先頭の数行と最後の 2 行を残します。貼ってよいテスト用 DB なら `--page-text` で文字を残せます。ログアウト・削除・ダウンロードらしいリンクはたどりません
+3. 記録した操作でどの表が変わったか(`.ashiato/sessions`。Vite プラグインと `ashiato record` で記録したもの):画面ごとに、操作・通信・件数と変わった列(`orders +1, stock ~1 (qty↓)`)。値は入れません。記録が列を外していた(`--ignore-columns`)ときはそのことも書くので、`verify` も同じオプションで実行してください
+4. テーブル定義(`schema` と同じ)、今あるテスト(`*.spec.ts` / `*.verify.md` のタイトル)、任意で最後に `--code repomix-output.xml`
+
+ログインが要るアプリ:`--login` でブラウザを開いて一度ログインすると `.ashiato/login.json` に保存し、`pack`・`verify --auto`・書き出したテストで使います(Cookie が入るので、バージョン管理に入れないでください)。
+
+**`verify --auto`** は、各手順の `操作:`(`Actions:`)の下の操作をブラウザで実行し、DB の変化が落ち着くのを待ってから、`verify` と同じく照合します。`操作:` のない手順は今までどおり人が行います(WinForms の画面やバッチも同じファイルに書けます)。
+
+```markdown
+## 1. 受注を登録する
+
+操作:
+- 開く: /orders/new
+- 選ぶ: 得意先 = 鈴木商事
+- 入力: spinbutton = 3 (「A001」の行)
+- 押す: 登録
+- 確認: 「登録しました」が表示される
+
+期待する DB の変化:
+- ORDERS: 追加 1 行 (CUSTOMER_CODE=C001, QTY=3)
+- STOCK: 更新 1 行 (ITEM_CODE=A001) → (QTY-=3, ...)
+```
+
+- 操作:`開く`・`入力`・`選ぶ`・`チェック` / `チェックを外す`・`押す`・`キー`・`待つ` / `確認`(`「文字」が表示される` / `が表示されない`、または入力欄の値 `数量 = 3`)・`ダイアログ`(次の `confirm` / `prompt` への答え。`キャンセル` か入れる文字。書かなければ OK で答えます)。英語(`open`・`fill`・`click` など)でも書けます
+- 要素はアクセシビリティ木の名前で、一字一句そのまま指します。ボタンやリンクは名前、入力欄はラベルです。CSS や XPath は使いません。名前のない欄は、画面全体かその行にその種類が 1 つだけなら役割名(`spinbutton`・`combobox`・`textbox`・`checkbox` など)で指せます。`(「1042」の行)` はその文字が出ている表の行の中、`(最初の行)` / `(最後の行)` は見出し以外の最初 / 最後の行の中を探します
+- 操作が失敗すると、その理由(その名前がない、複数ある、隠れている、無効、リストボックスではない…)と、画面にある似た名前、その時点の画面の木を結果に出します。NG の手順には、期待・違い・変わった行も出します。チャットに貼り返せば、どの行をどう直すかが分かります
+- 結果には、`query` と同じく変わった行の値と画面の文字が入ります。テスト用の DB で使ってください
+- `--headed` でブラウザを表示します。`--cdp http://127.0.0.1:9222` で起動中のブラウザ(`--remote-debugging-port` 付きで起動した WebView2 アプリなど)を使います
+
+**`export-tests`** は、手順ファイルを Playwright のテスト(`tests/e2e/<名前>.spec.ts`)にします。手順ごとに `test.step` を作り、要素は `verify --auto` と同じ方法で探し、`expectDbChanges(操作, [...行])` で照合します(`expectDbChanges` は期待する DB の変化の行をそのまま受け取ります)。人が行う手順は `TODO` のコメントになります。上書きするのは自分が書いたファイルだけです(ほかは `--force`)。`ASHIATO_DB_URL` を設定し、手順の始まりの状態から `--workers=1` で実行してください。
+
+**AIエージェント向け**:MCP サーバーにも同じ 2 つがツールとしてあります。`pack` はテキストを返します(`--share-values` なしでは値は `…`。`page_text` もそのときだけ使えます)。`verify_auto` は結果の全体をファイルに書き、`--share-values` なしでは値を含まない要約を返します:判定、失敗した操作と理由、画面にある似た名前、値を隠した画面の木、変化の件数と列。
+
 ### 大きなテーブル
 
 全件を読むのは最初のスナップショットだけです。以降は、DB側で各テーブルを約256行ずつのバケットに分け、バケットごとの行数とチェックサムを返します。チェックサムが変わったバケットだけを読み直すので、何も変わっていないチェックポイントではほとんど通信しません。使うのは通常の `SELECT` だけで、設定変更も追加の権限も不要です。
@@ -612,7 +710,7 @@ HAVING o.total <> SUM(l.qty * l.price);
 4. ✅ 大きなテーブル向けの高速化:チェックサムが変わったバケットだけを読み直す(`xmin`・`rowversion`・`ORA_ROWSCN`・行ハッシュ)
 5. ✅ テスト証跡の出力(Excel / PDF)。各ステップの画面キャプチャ付き
 6. ✅ Playwright 向け `expectDbChanges()`、記録からのテストコード生成、AIエージェント向けの CLI / MCP サーバー
-7. ⬜ AIチャットから E2E テストを作る:`pack` がチャットに渡す材料(各画面のアクセシビリティ木・画面→テーブルの対応・テーブル定義)を書き出し、`verify --auto` がチャットの書いた手順を Playwright で実行し、`export-tests` が安定した手順を Playwright のテストにする([構想メモ](docs/e2e-from-chat.ja.md))
+7. ✅ AIチャットから E2E テストを作る:`pack` がチャットに渡す材料(各画面のアクセシビリティ木・画面→テーブルの対応・テーブル定義)を書き出し、`verify --auto` がチャットの書いた手順を Playwright で実行し、`export-tests` が安定した手順を Playwright のテストにする([構想メモ](docs/e2e-from-chat.ja.md))
 
 ## License
 
