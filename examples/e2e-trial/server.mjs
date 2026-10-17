@@ -12,8 +12,10 @@ db.exec(`
   CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, qty INTEGER, updated_at TEXT);
   CREATE TABLE stock (item_id INTEGER PRIMARY KEY, qty INTEGER);
   CREATE TABLE audit_log (message TEXT);
-  INSERT INTO stock VALUES (3, 50), (4, 20);
 `);
+// The starting rows (stock 3 = 50, 4 = 20); POST /api/reset puts them back so every test starts the same.
+const reset = () => db.exec("DELETE FROM orders; DELETE FROM stock; DELETE FROM audit_log; INSERT INTO stock VALUES (3, 50), (4, 20)");
+reset();
 
 const readBody = (req) =>
   new Promise((resolve) => {
@@ -35,6 +37,10 @@ const vite = await createServer({
             res.setHeader("content-type", "application/json");
             res.end(JSON.stringify(body));
           };
+          if (req.url === "/api/reset" && req.method === "POST") {
+            reset();
+            return send({ ok: true });
+          }
           if (req.url === "/api/orders" && req.method === "POST") {
             const id = db.prepare("SELECT COALESCE(MAX(id), 0) + 1 AS id FROM orders").get().id;
             db.prepare("INSERT INTO orders (id, customer_id, qty, updated_at) VALUES (?, 7, 10, 'now')").run(id);

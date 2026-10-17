@@ -6,6 +6,12 @@ import { watchDb } from "ashiato";
 const db = watchDb(`sqlite:${process.env.APP_DB ?? new URL("../app.db", import.meta.url).pathname}`, { ignoreColumns: ["updated_at"] });
 test.afterAll(() => db.close());
 
+// Every test starts from the same rows (stock 3 = 50, 4 = 20), whatever ran before it.
+const appUrl = process.env.APP_URL ?? "http://127.0.0.1:3000";
+test.beforeEach(async () => {
+  await fetch(`${appUrl}/api/reset`, { method: "POST" });
+});
+
 test("保存ボタン(ロケーター: モデルなし)", async ({ app, screen }) => {
   await app.open("/");
   await db.expectChanges(
@@ -29,7 +35,7 @@ test("保存ボタン(agent.act)", async ({ app, screen, agent }) => {
     },
     {
       orders: { inserted: [{ customer_id: 7, qty: 10 }] },
-      stock: { updated: [{ where: { item_id: 3 }, set: { qty: 30 } }] },
+      stock: { updated: [{ where: { item_id: 3 }, set: { qty: 40 } }] },
     },
   );
 });
