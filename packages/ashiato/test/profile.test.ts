@@ -239,6 +239,21 @@ describe("ashiato schema --data on SQLite", () => {
     }
   });
 
+  it("starts the --data description line the way tazuna looks for it (its dbChecks.ts), in both languages", async () => {
+    // tazuna adds its procedure's data line only when schema.md has a line starting like this
+    const TAZUNA_DATA_INTRO = /^(?:`--data` で |With `--data`, )/m;
+    const db = await connect(url);
+    try {
+      for (const lang of ["ja", "en"] as const) {
+        const tables = ["T_LOG"];
+        expect((await schemaMarkdown(db, { lang, tables, data: {} })).markdown).toMatch(TAZUNA_DATA_INTRO);
+        expect((await schemaMarkdown(db, { lang, tables })).markdown).not.toMatch(TAZUNA_DATA_INTRO);
+      }
+    } finally {
+      await db.close();
+    }
+  });
+
   it("writes nothing new without --data", async () => {
     const db = await connect(url);
     try {

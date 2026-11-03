@@ -22,6 +22,7 @@ const TEXT = {
     title: "# Database tables",
     intro: (db: string) =>
       `Written by \`ashiato schema\` from the ${db} catalog (read-only): columns, types, primary keys and comments. Run it again after the tables change.`,
+    // tazuna (its src/pack/dbChecks.ts) knows schema.md has data by how this line starts, in both languages
     dataIntro: (date: string) =>
       `With \`--data\`, it also describes the rows as of ${date}: row counts, references (foreign keys, and relations inferred from the values), and for each column the share of NULLs, the number of distinct values, the values of codes with their counts, ranges and formats. In formats, 9 is a digit, A / a a letter, あ / ア kana and 漢 a kanji; a letter that is the same in every value is written as itself. The values of the columns marked "hidden" are not written (data-rules.json changes which).`,
     tables: "## Tables",
