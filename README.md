@@ -18,6 +18,8 @@ Checking that "Save" really wrote the right rows usually means a pile of hand-wr
 - **All major databases.** SQL Server, Oracle, PostgreSQL, MySQL / MariaDB, SQLite.
 - **Local only.** Everything stays on your machine. Sessions are saved as JSON files.
 
+For an IT security review (what is sent where, dependencies, database access, files written), see [docs/security-review.ja.md](docs/security-review.ja.md) (Japanese).
+
 ## Quick start
 
 ```sh
@@ -420,7 +422,7 @@ npx ashiato record --db "mssql://user:pass@localhost:1433/devdb" --tables orders
 
 アプリを操作し、操作ごとにターミナルで **Enter** を押します(先にラベルを入力しても構いません)。タイムライン画面 <http://127.0.0.1:4100> の **Checkpoint** ボタンでも記録できます。**Ctrl+C** で終了すると、セッションが `.ashiato/sessions/` に保存されます。あとから `ashiato show <ファイル>` で見返せます。
 
-社内の SQL Server / Oracle と実際のアプリで試すときの手順は [docs/trial-guide.ja.md](docs/trial-guide.ja.md) にあります。
+社内の SQL Server / Oracle と実際のアプリで試すときの手順は [docs/trial-guide.ja.md](docs/trial-guide.ja.md) にあります。導入審査向けの説明(通信・依存・DB へのアクセス・書き込むファイル)は [docs/security-review.ja.md](docs/security-review.ja.md) にあります。
 
 ### Viteアプリから自動でチェックポイント
 
