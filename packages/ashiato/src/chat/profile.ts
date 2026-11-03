@@ -9,7 +9,8 @@ import type { JsonValue, TableRef } from "../core/types.js";
  * SELECT through `runQuery` (read-only, or always rolled back). Actual values are written in three
  * places only (the values of a column that reads as a code, the lowest and highest number or date,
  * and the sample rows asked for with --samples), and never for a hidden column: the rest is counts,
- * lengths and shapes (C999).
+ * lengths and shapes (C999, whose letters are written only when at least 5 values share them).
+ * Free text shows its length only, hidden or not.
  */
 
 /** What a column holds, as far as describing its data goes. */
@@ -52,6 +53,8 @@ export function columnKind(dialect: string, type: string): ColumnKind {
       if (base === "long") return "skip";
       return "opaque";
     case "postgres":
+      // arrays (integer[], character varying(20)[]): neither compared nor measured as their elements
+      if (t.endsWith("]")) return "opaque";
       if (/^(smallint|integer|bigint|numeric|decimal|real|double precision|money)$/.test(base)) return "number";
       if (base === "boolean") return "flag";
       if (/^(date|timestamp|time)\b/.test(base)) return "date";
@@ -142,16 +145,24 @@ function ruleMatches(patterns: string[] | undefined, table: TableRef, column: st
  * Words in a column's name or comment that say it may hold something about a person, a credential or
  * free text. Hiding too much only costs the AI a hint; the person can show a column with data-rules.json.
  */
-const SENSITIVE = [
-  // names and contact
-  /NAME|KANA|SHIMEI|SIMEI|TEL|PHONE|FAX|MOBILE|KEITAI|DENWA|MAIL|ADDR|JUSHO|JUSYO|JUUSYO|ZIP|POSTAL|POST_?CODE|YUU?BIN|BIRTH|SEINEN|TANJOU?/i,
+const PERSONAL = [
+  // names and contact, in English and in the romaji Japanese schemas use (TANTO_MEI, CUSTOMER_NM, JYUSHO, POST_NO)
+  /NAME|NAMAE|NM(_|\d|$)|MEI(_|\d|$)|KANA|SHIMEI|SIMEI|TEL|PHONE|FAX|MOBILE|KEITAI|DENWA|MAIL|ADDR|JY?UU?S(H|Y)O|ZIP|POSTAL|POST_?(CODE|N(O|UM))|YUU?BIN|BIRTH|SEINEN|TANJOU?/i,
   /氏名|名前|名称|フリガナ|ふりがな|カナ|かな|電話|携帯|ＴＥＬ|ＦＡＸ|メール|住所|郵便|〒|生年月日|誕生|名$/,
-  // credentials and numbers
-  /PASS|PWD|TOKEN|SECRET|CREDIT|CARD_?N(O|UM)|ACCOUNT_?N(O|UM)|ACCT_?NO|KOU?ZA|MY_?NUMBER/i,
-  /パスワード|暗証|口座|カード番号|マイナンバー|個人番号/,
+  // numbers that identify a person or an account
+  /CREDIT|CARD_?N(O|UM)|ACCOUNT_?N(O|UM)|ACCT_?NO|KOU?ZA|MY_?NUMBER/i,
+  /口座|カード番号|マイナンバー|個人番号/,
+];
+/** Credentials: not even their shape is shown in the sample rows. */
+const SECRET = [
+  /PASS|PWD|TOKEN|SECRET|APIKEY|(API|ACCESS|PRIVATE|SHARED|LICEN[CS]E|CRYPT[A-Z]*|SIGN[A-Z]*)_?KEY|(^|_)PIN(_|\d|$|CODE|CD|NO)|ANSHO|SALT|HASH|CONN(ECTION)?_?STR|CONNSTR|(^|_)DSN(_|$)|AUTH_?(CODE|CD|KEY)|(^|_)OTP(_|$)|SESSION_?(ID|KEY)|COOKIE|CERT/i,
+  /パスワード|暗証|鍵|秘密|認証|接続文字列|証明書/,
 ];
 /** Free text: the sample rows show only its length. */
-const FREE_TEXT = [/NOTE|MEMO|REMARK|COMMENT|BIKOU?|DESCRIPTION/i, /備考|メモ|摘要|コメント|説明|内容/];
+const FREE_TEXT = [
+  /NOTE|MEMO|REMARK|COMMENT|BIKOU?|DESCRIPTION|BODY|MESSAGE|CONTENT|NAIYOU?|SHOU?SAI|SYOU?SAI|TEKIYOU?/i,
+  /備考|メモ|摘要|コメント|説明|内容|詳細|本文/,
+];
 
 const said = (words: RegExp[], c: ColumnInfo) => words.some((w) => w.test(c.name) || (c.comment !== undefined && w.test(c.comment)));
 
@@ -159,7 +170,7 @@ const said = (words: RegExp[], c: ColumnInfo) => words.some((w) => w.test(c.name
 export function isHidden(table: TableRef, c: ColumnInfo, rules: DataRules): boolean {
   if (ruleMatches(rules.hide, table, c.name)) return true;
   if (ruleMatches(rules.show, table, c.name)) return false;
-  return said(SENSITIVE, c) || said(FREE_TEXT, c);
+  return said(PERSONAL, c) || said(SECRET, c) || said(FREE_TEXT, c);
 }
 
 /** The shape of a value: digits 9, letters A / a, kana あ / ア / ｱ, kanji 漢; anything else stays. */
@@ -182,9 +193,13 @@ export function shapeOf(value: string): string {
   return out;
 }
 
+/** Values a shape needs before its letters that never change are written as themselves (one value's letters are that value). */
+const LITERAL_VALUES = 5;
+
 /**
  * The shapes of a column's values when they are few (3 at most, 30 characters at most), most common
- * first. A letter that is the same in every value of a shape is written as itself (C999).
+ * first. A letter that is the same in every value of a shape with at least 5 values is written as
+ * itself (C999).
  */
 export function formatsOf(values: string[]): string[] | undefined {
   const groups = new Map<string, string[][]>();
@@ -202,7 +217,7 @@ export function formatsOf(values: string[]): string[] | undefined {
     .map(([shape, chars]) =>
       [...shape]
         .map((s, i) => {
-          if (!"AaＡａ".includes(s)) return s;
+          if (!"AaＡａ".includes(s) || chars.length < LITERAL_VALUES) return s;
           const first = chars[0]![i]!;
           return chars.every((c) => c[i] === first) ? first : s;
         })
@@ -216,6 +231,8 @@ export interface ColumnProfile {
   hidden: boolean;
   /** Free text (by name, by comment, or longer than 50 characters): the sample rows show its length only. */
   freeText: boolean;
+  /** A credential by its name or comment: the sample rows leave it out. */
+  secret: boolean;
   /** Of the rows read. */
   nulls?: number;
   distinct?: number;
@@ -296,6 +313,7 @@ export async function profileTable(db: DbAdapter, table: TableRef, info: TableIn
     kind: columnKind(dialect, c.type),
     hidden: isHidden(table, c, options.rules),
     freeText: said(FREE_TEXT, c),
+    secret: said(SECRET, c),
   }));
   let read = large ? Math.min(rows, options.sampleRows) : rows;
 
@@ -365,8 +383,8 @@ export async function profileTable(db: DbAdapter, table: TableRef, info: TableIn
       } else if (c.kind === "string" && distinct >= MIN_USES && (c.maxLength ?? Infinity) <= 30) {
         const x = col(c.name);
         const res = await run(`SELECT DISTINCT ${x} AS v FROM ${src} WHERE ${x} IS NOT NULL`, SHAPE_VALUES);
-        // the values are only turned into shapes here: none of them is kept
-        const formats = formatsOf(res.rows.map((r) => String(r[0])));
+        // the values are only turned into shapes here: none of them is kept. More values than read: shapes unknown
+        const formats = res.more ? undefined : formatsOf(res.rows.map((r) => String(r[0])));
         if (formats) c.formats = formats;
       }
     } catch (e) {
@@ -421,9 +439,12 @@ async function sampleRows(
       if (c.kind === "opaque") return { omitted: true };
       if (v === null) return { value: null };
       if (c.kind === "text") return { length: num(v) };
-      if (!c.hidden) return { value: v };
-      if (c.kind === "date") return { date: true };
+      // free text may name anyone, hidden or not (a long nvarchar body): its length only
       if (c.freeText) return { length: [...String(v)].length };
+      if (!c.hidden) return { value: v };
+      // a credential's shape, or a yes / no (whose stand-in's length would tell true from false), isn't shown
+      if (c.secret || c.kind === "flag" || typeof v === "boolean") return { omitted: true };
+      if (c.kind === "date") return { date: true };
       return { standIn: standIn(String(v), options.key) };
     }),
   );
@@ -464,6 +485,8 @@ export interface ReferenceCandidate {
 
 /** Statements at most for inferring references, so a database with hundreds of tables can't take hours. */
 const MAX_CHECKS = 300;
+/** A table keyed by one of these alone is no master: a line number in another table only shares its name. */
+const GENERIC_KEY = /^(SEQ|SEQ_?NO|ID|NO|ROW_?NO|LINE_?NO|GYO_?NO|EDA_?NO|EDABAN|RENBAN|BRANCH_?NO|VERSION)$/i;
 
 /**
  * Relations no foreign key declares (SQL Server databases often have none): table A has every column
@@ -479,8 +502,10 @@ export async function inferReferences(db: DbAdapter, tables: ReferenceCandidate[
   let checks = 0;
   for (const a of tables) {
     const found = new Map<string, Reference[]>();
+    let stopped = false;
     for (const b of tables) {
       if (b === a || !b.key.length || sameSet(a.key, b.key)) continue;
+      if (b.key.length === 1 && GENERIC_KEY.test(b.key[0]!)) continue;
       const columns = b.key.map((k) => a.columns.find((c) => same(c, k)));
       if (columns.some((c) => c === undefined)) continue;
       const cols = columns as string[];
@@ -490,7 +515,8 @@ export async function inferReferences(db: DbAdapter, tables: ReferenceCandidate[
       if (a.profile.read === 0) continue;
       if (++checks > MAX_CHECKS) {
         problems.push(`Stopped inferring references after ${MAX_CHECKS} checks: pick the tables with --tables`);
-        return problems;
+        stopped = true;
+        break;
       }
       const from = db.fromClause(a.table);
       const src = a.profile.rows > options.largeTable ? `(${firstRows(dialect, "*", from, options.sampleRows)}) s` : `${from} s`;
@@ -509,6 +535,8 @@ export async function inferReferences(db: DbAdapter, tables: ReferenceCandidate[
         // types that can't be compared (a code as text against a number): not a reference
       }
     }
+    // checks stopped halfway through this table: another table might also have fitted, so claim nothing for it
+    if (stopped) break;
     for (const refs of found.values()) if (refs.length === 1) a.profile.references.push(refs[0]!);
   }
   return problems;

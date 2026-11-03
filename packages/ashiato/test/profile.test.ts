@@ -41,6 +41,8 @@ describe("data profile helpers", () => {
       "other",
       "opaque",
     ]);
+    // arrays aren't their elements (char_length of a varchar(20)[] fails, min / max of numeric[] compares arrays)
+    expect(["character varying(20)[]", "numeric(10,2)[]", "integer[]"].map((t) => columnKind("postgres", t))).toEqual(["opaque", "opaque", "opaque"]);
     expect(["int unsigned", "decimal(38,18)", "bit(1)", "datetime(6)", "varchar(20)", "enum('a','b')", "longtext", "json"].map((t) => columnKind("mysql", t))).toEqual([
       "number",
       "number",
@@ -74,10 +76,13 @@ describe("data profile helpers", () => {
     expect(shapeOf("C001")).toBe("A999");
     expect(shapeOf("2026-11-03")).toBe("9999-99-99");
     expect(shapeOf("ﾃｽﾄ　テスト　てすと　試験　ＡＢ１")).toBe("ｱｱｱ　アアア　あああ　漢漢　ＡＡ９");
-    expect(formatsOf(["C001", "C002", "C017"])).toEqual(["C999"]);
-    expect(formatsOf(["C001", "D002", "AB-1", "AB-2", "AB-3"])).toEqual(["AB-9", "A999"]);
+    expect(formatsOf(["C001", "C002", "C017", "C020", "C031"])).toEqual(["C999"]);
+    expect(formatsOf(["C001", "D002", "AB-1", "AB-2", "AB-3", "AB-4", "AB-5"])).toEqual(["AB-9", "A999"]);
+    // letters are written only when at least 5 values share them: one value's letters are that value
+    expect(formatsOf(["C001", "C002", "C017"])).toEqual(["A999"]);
+    expect(formatsOf(["tanaka01", "suzuki02", "yamada03", "itou04", "sato05", "watanabe06"])).toEqual(["aaaaaa99", "aaaa99", "aaaaaaaa99"]);
     // char(n) padding is no part of the shape
-    expect(formatsOf(["X1  ", "X2  "])).toEqual(["X9"]);
+    expect(formatsOf(["X1  ", "X2  ", "X3  ", "X4  ", "X5  "])).toEqual(["X9"]);
     expect(formatsOf(["a1", "b22", "c333", "d4444"])).toBeUndefined();
     expect(formatsOf(["x".repeat(31)])).toBeUndefined();
   });
@@ -86,6 +91,11 @@ describe("data profile helpers", () => {
     const t = { schema: "dbo", name: "M_CUSTOMER" };
     const hidden = (name: string, comment?: string, rules = {}) => isHidden(t, { name, type: "varchar(20)", nullable: true, comment }, rules);
     expect(["CUSTOMER_NAME", "TEL_NO", "E_MAIL", "ADDR1", "BIRTH_DATE", "PASSWORD", "NOTE", "SHIMEI", "JUSHO"].every((n) => hidden(n))).toBe(true);
+    // romaji names Japanese schemas use, keys and connection strings, free text
+    const more = ["TANTO_MEI", "TOKUISAKIMEI", "CUSTOMER_NM", "NAMAE", "JYUSHO", "JUUSHO", "POST_NO", "API_KEY", "ACCESS_KEY", "PIN", "PIN_CODE", "ANSHO_NO", "CONN_STR", "BODY", "NAIYO", "SHOSAI", "TEKIYO"];
+    expect(more.filter((n) => !hidden(n))).toEqual([]);
+    // not names, keys or text: 明細 (MEISAI), shipping, primary keys of codes
+    expect(["MEISAI_NO", "SHIPPING_DATE", "OPINION_CD", "KEY_CD"].filter((n) => hidden(n))).toEqual([]);
     expect(hidden("COL01", "得意先名")).toBe(true);
     expect(hidden("COL02", "電話番号")).toBe(true);
     expect(["CUSTOMER_CODE", "STATUS", "QTY", "ORDER_DATE", "MEISAI_NO"].some((n) => hidden(n))).toBe(false);
@@ -234,6 +244,46 @@ describe("ashiato schema --data on SQLite", () => {
       expect(item).toContain("| ITEM_NAME | TEXT | NULL | 重複なし · 3〜5 文字 |");
       expect(item).toContain("| PRICE | INTEGER | NULL | 隠した列 · 重複なし |");
       expect(item).not.toContain("120");
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("hides what a review found shown: romaji names, keys, long text, a yes / no's stand-in, one value's letters, sequence keys", async () => {
+    const file2 = join(dir, "review.db");
+    const r = new DatabaseSync(file2);
+    r.exec(`
+      CREATE TABLE T_TASK (TASK_NO INTEGER PRIMARY KEY, TANTO_MEI TEXT, API_KEY TEXT, PASS_FLAG BOOLEAN, IS_VIP BOOLEAN, DETAIL_TXT TEXT);
+      CREATE TABLE M_LOGIN (LOGIN_ID TEXT PRIMARY KEY);
+      CREATE TABLE T_HISTORY (SEQ INTEGER PRIMARY KEY, AT DATE);
+      CREATE TABLE T_ORDER_DTL (ORDER_NO INTEGER, SEQ INTEGER, PRIMARY KEY (ORDER_NO, SEQ));
+    `);
+    const people = ["佐藤一郎", "山田太郎", "鈴木花子"];
+    const users = ["tanaka01", "suzuki02", "yamada03", "itou04", "sato05", "watanabe06"];
+    const long = (i: number) => `山田様 東京都港区1-2-3 にお住まい。連絡は 03-1234-${String(1000 + i)} へ。午後の配達を希望されています。`;
+    const stmt = r.prepare("INSERT INTO T_TASK VALUES (?, ?, ?, ?, ?, ?)");
+    for (let i = 1; i <= 30; i++) stmt.run(i, people[i % 3]!, `sk_live_${"x".repeat(10)}${i}`, i % 2, i % 3 === 0 ? 1 : 0, long(i));
+    const u = r.prepare("INSERT INTO M_LOGIN VALUES (?)");
+    for (const id of users) u.run(id);
+    const h = r.prepare("INSERT INTO T_HISTORY VALUES (?, ?)");
+    for (let i = 1; i <= 50; i++) h.run(i, "2026-11-01");
+    const d = r.prepare("INSERT INTO T_ORDER_DTL VALUES (?, ?)");
+    for (let i = 1; i <= 20; i++) d.run(1 + (i % 10), 1 + Math.floor(i / 10));
+    r.close();
+    const db = await connect(`sqlite:${file2}`);
+    try {
+      const { markdown } = await schemaMarkdown(db, { lang: "ja", data: { samples: 3, rules: { hide: ["IS_VIP"] } } });
+      for (const v of [...people, "sk_live_", "東京都港区", "03-1234-"]) expect(markdown).not.toContain(v);
+      const task = section(markdown, "T_TASK");
+      expect(task).toContain("| TANTO_MEI | TEXT | NULL | 隠した列 · 3 種 · 4 文字 |");
+      // long text that isn't hidden by its name: its length in the samples
+      expect(task).toContain("| DETAIL_TXT | TEXT | NULL | 重複なし · 55 文字 |");
+      // samples: a credential and a hidden yes / no are left out, long text is its length, the name is a stand-in
+      expect(task).toMatch(/\| 30 \| 〇〇〇〇 \| … \| … \| … \| \(55 文字\) \|/);
+      // a shape of one value doesn't spell that value
+      expect(section(markdown, "M_LOGIN")).toContain("| LOGIN_ID | TEXT | NOT NULL | 重複なし · 書式 aaaaaa99 / aaaa99 / aaaaaaaa99 |");
+      // T_HISTORY is keyed by SEQ alone: T_ORDER_DTL's line number SEQ is no reference to it
+      expect(section(markdown, "T_ORDER_DTL")).not.toContain("参照");
     } finally {
       await db.close();
     }
