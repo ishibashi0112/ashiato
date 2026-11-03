@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { connect } from "../src/adapters/index.js";
 import { loadDriver } from "../src/adapters/load.js";
+import { schemaMarkdown } from "../src/chat/schema.js";
 import { Recorder } from "../src/core/recorder.js";
 import type { Row } from "../src/core/types.js";
 
@@ -511,6 +512,60 @@ for (const [dialect, d] of Object.entries(dialects)) {
         await owner.close();
         await w.run(`DROP VIEW ${v}`).catch(() => undefined);
         await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+        await w.close();
+      }
+    }, 60_000);
+
+    it("describes the rows and reads foreign keys as a SELECT-only user (ashiato schema --data)", async () => {
+      const w = await d.writer(url!);
+      const [m, i, o] = ["ashiato_pm", "ashiato_pi", "ashiato_po"];
+      for (const t of [o, i, m]) await w.run(`DROP TABLE ${t}`).catch(() => undefined);
+      await w.run(`CREATE TABLE ${m} (code VARCHAR(10) PRIMARY KEY, cust_name VARCHAR(40) NOT NULL, kind CHAR(1))`);
+      await w.run(`CREATE TABLE ${i} (item VARCHAR(10) PRIMARY KEY, price INT)`);
+      // item refers to the second master without a foreign key, as in databases that declare none
+      await w.run(
+        `CREATE TABLE ${o} (id INT PRIMARY KEY, code VARCHAR(10) NOT NULL, item VARCHAR(10), status CHAR(2) NOT NULL, qty INT, day DATE, amount ${d.dec}, note ${d.types.doc}, ` +
+          `CONSTRAINT ashiato_po_fk FOREIGN KEY (code) REFERENCES ${m} (code))`,
+      );
+      for (let n = 1; n <= 6; n++) await w.run(`INSERT INTO ${m} (code, cust_name, kind) VALUES ('M00${n}', 'Name ${n}', '${n % 2 ? "A" : "B"}')`);
+      for (let n = 1; n <= 3; n++) await w.run(`INSERT INTO ${i} (item, price) VALUES ('I0${n}', ${n * 100})`);
+      for (let n = 1; n <= 30; n++) {
+        await w.run(
+          `INSERT INTO ${o} (id, code, item, status, qty, day, amount, note) VALUES (${n}, 'M00${1 + (n % 6)}', 'I0${1 + (n % 3)}', '${n <= 25 ? "10" : "90"}', ` +
+            `${n % 5 === 0 ? "NULL" : n % 4}, ${d.date}, 1.5, ${n === 7 ? `'"call Name 1"'` : "NULL"})`,
+        );
+      }
+      const db = await connect(await w.readOnlyUrl([m, i, o]));
+      try {
+        const orders = (await db.listTables()).find((x) => x.name.toLowerCase() === o)!;
+        const keys = await db.foreignKeys!(orders);
+        expect(keys.map((k) => [k.columns.map((c) => c.toLowerCase()), k.references.name.toLowerCase(), k.referencedColumns.map((c) => c.toLowerCase())])).toEqual([
+          [["code"], m, ["code"]],
+        ]);
+
+        const { markdown, problems } = await schemaMarkdown(db, { lang: "en", tables: [m, i, o], data: { samples: 2, date: "2026-11-03" } });
+        expect(problems).toEqual([]);
+        expect(markdown).toMatch(/References: code → (\w+\.)?ashiato_pm\.code\(foreign key\); item → (\w+\.)?ashiato_pi\.item\(inferred: every value is found there\)/i);
+        expect(markdown).toMatch(/\| status \| [^|]+ \| NOT NULL \| 10 \(25\), 90 \(5\) \|/i);
+        expect(markdown).toMatch(/\| qty \| [^|]+ \| NULL \| NULL 20% · \d \(\d+\), /i);
+        expect(markdown).toMatch(/\| day \| [^|]+ \| NULL \| 1 distinct · 2026-10-11( 00:00:00)? \|/i);
+        expect(markdown).toMatch(/\| amount \| [^|]+ \| NULL \| 1\.5 \(30\) \|/i);
+        expect(markdown).toMatch(/\| cust_name \| [^|]+ \| NOT NULL \| hidden · no duplicates · 6 characters \|/i);
+        expect(markdown).toMatch(/\| code \| [^|]+ \| NOT NULL \| no duplicates · format M999 \|/i);
+        expect(markdown).toMatch(/\| note \| [^|]+ \| NULL \| hidden · NULL >99%|\| note \| [^|]+ \| NULL \| hidden · NULL 97%/i);
+        expect(markdown).toMatch(/Sample rows \(the 2 with the highest primary key; hidden columns replaced\):\n\n\| id \| code \| item \|/i);
+        // JSON columns aren't read for samples (…)
+        expect(markdown).toMatch(/\n\| 30 \| M001 \| I01 \| 90 \| NULL \| 2026-10-11( 00:00:00)? \| 1\.5 \| (NULL|…) \|/);
+        expect(markdown).not.toContain("Name ");
+
+        // a large table: the column figures come from its first rows, in each database's words
+        const large = await schemaMarkdown(db, { lang: "en", tables: [o], data: { largeTable: 10, sampleRows: 5 } });
+        expect(large.problems).toEqual([]);
+        expect(large.markdown).toContain("Rows: 30 (the column figures come from the first 5)");
+        expect(large.markdown).toMatch(/\| id \| [^|]+ \| NOT NULL \| no duplicates · \d+ to \d+ \|/i);
+      } finally {
+        await db.close();
+        for (const t of [o, i, m]) await w.run(`DROP TABLE ${t}`).catch(() => undefined);
         await w.close();
       }
     }, 60_000);

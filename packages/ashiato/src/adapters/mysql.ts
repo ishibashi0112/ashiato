@@ -1,6 +1,7 @@
 import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
+import { groupForeignKeys } from "./foreignKeys.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter, QueryResult } from "./types.js";
 
@@ -135,6 +136,17 @@ export async function connectMysql(url: URL): Promise<DbAdapter> {
         columns: cols.map((c) => ({ name: String(c.name), type: String(c.type), nullable: c.nullable === "YES", comment: text(c.comment) })),
         comment: text(table[0]?.comment),
       };
+    },
+    fromClause: name,
+    async foreignKeys(t) {
+      const rows = await query(
+        `SELECT CONSTRAINT_NAME AS k, COLUMN_NAME AS c, REFERENCED_TABLE_SCHEMA AS rs, REFERENCED_TABLE_NAME AS rt, REFERENCED_COLUMN_NAME AS rc
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+          ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`,
+        [t.schema ?? null, t.name],
+      );
+      return groupForeignKeys(rows.map((r) => ({ key: String(r.k), column: String(r.c), schema: String(r.rs), table: String(r.rt), referencedColumn: String(r.rc) })));
     },
     async runQuery(sql, maxRows) {
       // A read-only transaction (the server refuses any write) and sql_select_limit, so that only

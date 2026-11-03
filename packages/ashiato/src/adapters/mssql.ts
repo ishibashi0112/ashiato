@@ -1,6 +1,7 @@
 import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { JsonValue, Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
+import { groupForeignKeys } from "./foreignKeys.js";
 import { loadDriver } from "./load.js";
 import type { ColumnInfo, DbAdapter, QueryResult } from "./types.js";
 
@@ -205,6 +206,23 @@ export async function connectMssql(url: URL): Promise<DbAdapter> {
         { t: name(t) },
       );
       return { columns: cols.map(columnInfo), comment: text(table[0]?.comment) };
+    },
+    fromClause: name,
+    async foreignKeys(t) {
+      // sys.foreign_keys (2005 and later): a SELECT-only user sees the keys of the tables it may read
+      const rows = await query(
+        `SELECT fk.name AS k, pc.name AS c, rs.name AS rs, rt.name AS rt, rc.name AS rc
+           FROM sys.foreign_keys fk
+           JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+           JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+           JOIN sys.tables rt ON rt.object_id = fkc.referenced_object_id
+           JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+           JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+          WHERE fk.parent_object_id = OBJECT_ID(@t)
+          ORDER BY fk.name, fkc.constraint_column_id`,
+        { t: name(t) },
+      );
+      return groupForeignKeys(rows.map((r) => ({ key: String(r.k), column: String(r.c), schema: String(r.rs), table: String(r.rt), referencedColumn: String(r.rc) })));
     },
     async runQuery(sql, maxRows) {
       // SQL Server has no read-only transaction: the statement was checked to be a SELECT, the user

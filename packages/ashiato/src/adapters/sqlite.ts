@@ -1,6 +1,6 @@
 import { normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
-import type { DbAdapter, QueryResult } from "./types.js";
+import type { DbAdapter, ForeignKey, QueryResult } from "./types.js";
 
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 
@@ -49,6 +49,27 @@ export async function connectSqlite(path: string): Promise<DbAdapter> {
         nullable: Number(c.notnull) === 0 && Number(c.pk) === 0,
       }));
       return { columns };
+    },
+    fromClause: (t: TableRef) => q(t.name),
+    async foreignKeys(t: TableRef) {
+      // REFERENCES other(col); without a column list the key refers to the other table's primary key
+      const rows = all(`PRAGMA foreign_key_list(${q(t.name)})`).sort((a, b) => Number(a.id) - Number(b.id) || Number(a.seq) - Number(b.seq));
+      const keys: ForeignKey[] = [];
+      for (const r of rows) {
+        if (Number(r.seq) === 0) keys.push({ columns: [], references: { name: String(r.table) }, referencedColumns: [] });
+        const fk = keys[keys.length - 1]!;
+        fk.columns.push(String(r.from));
+        fk.referencedColumns.push(r.to === null || r.to === undefined ? "" : String(r.to));
+      }
+      for (const fk of keys) {
+        if (!fk.referencedColumns.includes("")) continue;
+        const key = all(`PRAGMA table_info(${q(fk.references.name)})`)
+          .filter((c) => Number(c.pk) > 0)
+          .sort((a, b) => Number(a.pk) - Number(b.pk))
+          .map((c) => String(c.name));
+        fk.referencedColumns = fk.columns.map((_, i) => key[i] ?? "");
+      }
+      return keys;
     },
     async runQuery(sql: string, maxRows: number): Promise<QueryResult> {
       // the database is opened read-only, so nothing can be written whatever the statement says

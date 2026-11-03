@@ -39,6 +39,13 @@ export interface TableInfo {
   comment?: string;
 }
 
+/** A foreign key as `foreignKeys` returns it: `columns[i]` refers to `referencedColumns[i]`. */
+export interface ForeignKey {
+  columns: string[];
+  references: TableRef;
+  referencedColumns: string[];
+}
+
 /** What one statement run by `runQuery` returned. */
 export interface QueryResult {
   /** Column names in order. The same name can appear twice (two tables' `id`). */
@@ -84,5 +91,12 @@ export interface DbAdapter {
    * has read-only transactions the statement runs in one, as a second guard, and nothing is committed.
    */
   runQuery?(sql: string, maxRows: number): Promise<QueryResult>;
+  /**
+   * Optional, for `ashiato schema --data`: the table as a FROM clause names it in this database
+   * (quoted, with its schema), so that the statements it writes can go through `runQuery`.
+   */
+  fromClause?(table: TableRef): string;
+  /** Optional, for `ashiato schema --data`: the foreign keys declared on a table, from the catalog (no rows are read). */
+  foreignKeys?(table: TableRef): Promise<ForeignKey[]>;
   close(): Promise<void>;
 }

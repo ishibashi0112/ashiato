@@ -209,12 +209,13 @@ npx ashiato tables --db <url> --json
 Where AI agents aren't allowed but a chat is (Microsoft 365 Copilot Chat, for example), you carry the text between the chat and your machine. Three commands make that one paste each way:
 
 ```sh
-npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
+npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--data [--samples 3] [--rules <file>]] [--out docs/db/schema.md]
 npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <file>] [--no-clip]
 npx ashiato verify checks/order-entry.verify.md --db <url> [--tables ...] [--ignore-columns ...] [--out <file>] [--no-clip] [--save-session]
 ```
 
 - **`schema`** writes the tables' and views' columns, types, primary keys and comments as Markdown (`docs/db/schema.md` by default), for the chat to write SQL against. No row values. `--tables` takes names or `*` / `?` patterns: a chat takes about 100,000 characters in one paste, so pick the tables of a large database.
+- **`schema --data`** also writes what the rows look like, so the chat needn't ask you to run a SELECT first: each table's row count and references (its foreign keys, and relations inferred from the values: a column set named like another table's primary key whose every value is found there, for databases that declare no foreign keys), and per column the share of NULLs, the number of distinct values, the values of a column that reads as a code with their counts (at most 20 values, each used by 5 rows or more on average), the lowest and highest number or date, and the format of text (`C999`: 9 a digit, A / a a letter; a letter is written as itself only when at least 5 values share it). Columns whose name or comment looks personal, secret or free text (name, kana, tel, mail, address, zip, birth, password, token, API / access keys, PIN, connection strings, card / account numbers, note, memo, remark, comment, body, message, the romaji Japanese schemas use such as `TANTO_MEI`, `CUSTOMER_NM`, `JYUSHO`, `POST_NO`, `NAIYO`, `TEKIYO`, and their Japanese words) are marked hidden: their NULLs, number of values and length only. List the columns to hide or to show in `docs/db/data-rules.json` (next to the output; or `--rules <file>`): `{"hide": ["M_EMPLOYEE.*", "*.SALARY"], "show": ["M_ITEM.ITEM_NAME"]}`. `--samples 3` adds the 3 rows with the highest primary key per table, hidden columns replaced by values of the same shape (`090-1234-5678` → `338-0468-0083`, the same value by the same stand-in within one run, new ones each run); credentials and hidden yes / no columns are left out (`…`), and free text (or any text over 50 characters, hidden or not) shows its length only. Tables over 1,000,000 rows are described from their first 100,000 (the count stays exact). Read the file before you give it to a chat: the codes, ranges and sample rows are your test database's values.
 - **`query`** runs the statements of `.sql` files (a folder: its `.sql` files by name), one after another, and copies the results to the clipboard as Markdown: each statement with the comment above it, its SQL, and its first `--max-rows` rows. Paste that into the chat. A statement that fails shows the database's error and the others still run.
 
 ```sql
@@ -574,12 +575,13 @@ npx ashiato tables --db <url> --json
 AIエージェントは使えないがチャット(Microsoft 365 Copilot Chat など)は使える環境では、チャットと手元のPCの間を人がテキストで運びます。次の3つのコマンドで、行き帰りとも1回の貼り付けで済みます。
 
 ```sh
-npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--out docs/db/schema.md]
+npx ashiato schema --db <url> [--tables "M_*,T_ORDER"] [--no-views] [--data [--samples 3] [--rules <ファイル>]] [--out docs/db/schema.md]
 npx ashiato query checks/order-totals.sql --db <url> [--max-rows 50] [--out <ファイル>] [--no-clip]
 npx ashiato verify checks/受注登録.verify.md --db <url> [--tables ...] [--ignore-columns ...] [--out <ファイル>] [--no-clip] [--save-session]
 ```
 
 - **`schema`**:テーブルとビューの列・型・主キー・コメントを Markdown に書き出します(既定は `docs/db/schema.md`)。チャットのAIがこれを見て SQL を書きます。行の値は含みません。`--tables` には名前か `*`・`?` のパターンを指定します。チャットに1回で貼れるのは10万文字ほどなので、大きなDBではテーブルを絞ってください。
+- **`schema --data`**:データの姿も書き足します。チャットのAIが「まずこの SELECT を実行して結果をください」と頼まずに済むようにするためです。テーブルごとの件数と参照(外部キーと、値から推定したつながり。ほかのテーブルの主キーと同じ名前の列で、値がすべてそのテーブルに見つかるもの。外部キーを定義していないDB向け)、列ごとの NULL の割合・値の種類の数・区分とみなした列の値と件数(20 種以下で、1 つの値が平均 5 行以上で使われている列)・数値と日付の最小と最大・文字列の書式(`C999`。9 は数字、A / a は英字。英字をそのまま書くのは 5 つ以上の値で同じときだけ)です。列名かコメントが個人の情報・秘密・自由記述に見える列(氏名・カナ・電話・メール・住所・郵便番号・生年月日・パスワード・トークン・API キー・PIN・接続文字列・カード番号・口座・備考・メモ・コメント・本文など。`TANTO_MEI`・`CUSTOMER_NM`・`JYUSHO`・`POST_NO`・`NAIYO`・`TEKIYO` のようなローマ字の列名も)は「隠した列」として、NULL の割合・種類の数・文字数だけを書きます。隠す列・出す列は `docs/db/data-rules.json`(出力の隣。`--rules <ファイル>` でも指定可)に書きます:`{"hide": ["M_EMPLOYEE.*", "*.SALARY"], "show": ["M_ITEM.ITEM_NAME"]}`。`--samples 3` で各テーブルの主キーの大きい 3 行を足します。隠した列は同じ形の別の値に置き換えます(`090-1234-5678` → `338-0468-0083`。1 回の実行の中では同じ値は同じ置き換え、実行のたびに変わります)。パスワードなどの認証情報と、隠した真偽の列は `…` にし、自由記述(隠していなくても 50 文字を超える文字列)は文字数だけを書きます。100 万行を超えるテーブルは先頭 10 万行から書きます(件数は全件)。区分の値・範囲・見本の行はテスト用DBの実際の値なので、チャットに渡す前に読んでください。
 - **`query`**:`.sql` ファイル(フォルダーならその中の `.sql` を名前順)の文を順に実行し、結果を Markdown でクリップボードに入れます。文ごとに、直前のコメント・SQL・先頭 `--max-rows` 行が入ります。それをチャットに貼ります。エラーになった文はDBのエラーを表示し、残りの文はそのまま実行します。
 
 ```sql

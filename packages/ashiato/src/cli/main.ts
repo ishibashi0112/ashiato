@@ -11,7 +11,8 @@ import { decodeText } from "../chat/decode.js";
 import { planQueries, queryReport, refusedReport, runPlanned, type SqlFile } from "../chat/query.js";
 import { ignoredColumns, leftOut, makePack, type PackResult } from "../chat/pack.js";
 import { existingTests, filesIn, readSessions } from "../chat/files.js";
-import { schemaMarkdown } from "../chat/schema.js";
+import { parseDataRules } from "../chat/profile.js";
+import { schemaMarkdown, type DataOptions } from "../chat/schema.js";
 import { ActionRunner } from "../chat/auto.js";
 import { DEFAULT_LOGIN, openBrowser, saveLogin, type BrowserOptions, type Driven } from "../chat/browser.js";
 import { EXPORTED_HEADER, exportTest } from "../chat/exportTests.js";
@@ -41,7 +42,7 @@ Usage:
   ashiato checkpoint [label] [--recorder <url>] [--json] [--no-values]
   ashiato steps [<session.json>] [--recorder <url>] [--since <id>] [--full] [--json] [--no-values]
   ashiato mcp --db <url> [record options] [--share-values]   (or --recorder <url>)
-  ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--out docs/db/schema.md] [--lang ja|en]
+  ashiato schema --db <url> [--tables a,b,M_*] [--no-views] [--data [--samples 3] [--rules <file>]] [--out docs/db/schema.md] [--lang ja|en]
   ashiato query <file.sql | folder>... --db <url> [--max-rows 50] [--out <file>] [--no-clip] [--lang ja|en]
   ashiato verify <file.verify.md | folder>... --db <url> [--tables a,b] [--ignore-columns c] [--out <file>] [--no-clip] [--save-session] [--lang ja|en]
                  [--auto --app <url> [--login] [--storage-state <file>] [--headed] [--cdp <url>]]
@@ -95,6 +96,16 @@ For AI agents and scripts:
 For AI chats (no agent: you carry the text between the chat and this machine):
   schema                  Writes the definitions of the tables and views (columns, types, primary keys,
                           comments) as Markdown, for the chat to write SQL against
+  --data                  schema: also what the rows look like, so the chat needn't ask: row counts, foreign
+                          keys and relations inferred from the values, and per column the share of NULLs,
+                          the number of distinct values, the values of codes with their counts, ranges
+                          and formats (C999). Values of columns whose name or comment looks personal or
+                          secret (name, tel, mail, address, birth, password, note...) are not written.
+                          Tables over 1,000,000 rows are described from their first 100,000
+  --samples <n>           schema --data: also n sample rows per table (at most 20), hidden columns replaced
+                          by values of the same shape
+  --rules <file>          schema --data: columns to hide or show, as {"hide": ["M_EMPLOYEE.*"], "show":
+                          ["M_ITEM.ITEM_NAME"]} (default: data-rules.json next to the --out file, if there)
   query                   Runs the statements of .sql files (a folder: its .sql files) read-only and
                           copies the results to the clipboard as Markdown, to paste into the chat.
                           Only SELECT / WITH statements: if any statement could write, none is run.
@@ -170,6 +181,21 @@ const shown = (path: string) => {
   const rel = relative(process.cwd(), path);
   return (rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path).split(sep).join("/");
 };
+
+/** schema --data: the sample rows asked for, and the rules (--rules, or data-rules.json next to the output). */
+function dataOptions(values: { samples?: string; rules?: string }, out: string | undefined): DataOptions & { rulesFile?: string } {
+  let samples = 0;
+  if (values.samples !== undefined) {
+    samples = Number(values.samples);
+    if (!Number.isInteger(samples) || samples < 1 || samples > 20) throw new Error(`--samples ${values.samples}: a number from 1 to 20`);
+  }
+  const file = values.rules !== undefined ? resolve(values.rules) : join(dirname(out ?? resolve("docs", "db", "schema.md")), "data-rules.json");
+  if (!existsSync(file)) {
+    if (values.rules !== undefined) throw new Error(`--rules ${values.rules}: no such file`);
+    return { samples };
+  }
+  return { samples, rules: parseDataRules(decodeText(readFileSync(file)), shown(file)), rulesFile: file };
+}
 
 /** The .sql files named (a folder: its .sql files, by name), read as UTF-8 or Shift_JIS. */
 function readSqlFiles(paths: string[]): SqlFile[] {
@@ -602,6 +628,9 @@ export async function main(argv: string[]): Promise<void> {
       "no-values": { type: "boolean" },
       "share-values": { type: "boolean" },
       "no-views": { type: "boolean" },
+      data: { type: "boolean" },
+      samples: { type: "string" },
+      rules: { type: "string" },
       "no-clip": { type: "boolean" },
       "save-session": { type: "boolean" },
       auto: { type: "boolean" },
@@ -747,12 +776,17 @@ export async function main(argv: string[]): Promise<void> {
   if (command === "schema") {
     const lang = langOption(values.lang);
     try {
-      const { markdown, tables, views, unreadable } = await schemaMarkdown(db, { tables: list(values.tables), views: !values["no-views"], lang });
-      if (values.out === "-") return void process.stdout.write(markdown);
-      const out = resolve(values.out ?? join("docs", "db", "schema.md"));
+      const out = values.out === "-" ? undefined : resolve(values.out ?? join("docs", "db", "schema.md"));
+      const data = values.data ? dataOptions(values, out) : undefined;
+      if (!data && (values.samples !== undefined || values.rules !== undefined)) throw new Error("--samples and --rules go with --data");
+      const { markdown, tables, views, unreadable, problems, hidden } = await schemaMarkdown(db, { tables: list(values.tables), views: !values["no-views"], lang, data });
+      // the database's messages may quote values: on the terminal only, never in the file
+      for (const p of problems) console.error(`Note: ${p}`);
+      if (!out) return void process.stdout.write(markdown);
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, markdown);
       console.log(`Wrote ${shown(out)} (${tables} table(s), ${views} view(s); ${markdown.length.toLocaleString("en-US")} characters)`);
+      if (data) console.log(`Data as of today; ${hidden} column(s) hidden${data.rulesFile ? ` (rules: ${shown(data.rulesFile)})` : ""}. Read it before you give it to a chat.`);
       if (unreadable.length) console.log(`Could not read: ${unreadable.join(", ")}`);
       if (markdown.length > PASTE_LIMIT) console.log(`Note: that is more than a chat takes in one paste (about ${PASTE_LIMIT.toLocaleString("en-US")} characters): pick the tables with --tables.`);
     } finally {
