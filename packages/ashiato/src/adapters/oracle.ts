@@ -1,6 +1,7 @@
 import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
+import { groupForeignKeys } from "./foreignKeys.js";
 import { loadDriver } from "./load.js";
 import type { ColumnInfo, DbAdapter, QueryResult } from "./types.js";
 
@@ -238,6 +239,21 @@ export async function connectOracle(url: URL): Promise<DbAdapter> {
       );
       const table = await exec("SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = :owner AND TABLE_NAME = :tbl", binds);
       return { columns: cols.map(columnInfo), comment: text(table[0]?.COMMENTS) };
+    },
+    fromClause: name,
+    async foreignKeys(t) {
+      // ALL_CONSTRAINTS lists the keys of the tables this user may read, and the keys they refer to
+      const rows = await exec(
+        `SELECT c.CONSTRAINT_NAME AS K, cc.COLUMN_NAME AS C, r.OWNER AS RS, r.TABLE_NAME AS RT, rc.COLUMN_NAME AS RC
+           FROM ALL_CONSTRAINTS c
+           JOIN ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+           JOIN ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME
+           JOIN ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION
+          WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = :owner AND c.TABLE_NAME = :tbl
+          ORDER BY c.CONSTRAINT_NAME, cc.POSITION`,
+        { owner: t.schema ?? owner, tbl: t.name },
+      );
+      return groupForeignKeys(rows.map((r) => ({ key: String(r.K), column: String(r.C), schema: String(r.RS), table: String(r.RT), referencedColumn: String(r.RC) })));
     },
     async runQuery(sql, maxRows) {
       const run = async () => {

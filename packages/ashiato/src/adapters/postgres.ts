@@ -1,6 +1,7 @@
 import { exactDecimal, normalizeRow, normalizeValue } from "../core/normalize.js";
 import type { Row, TableRef } from "../core/types.js";
 import { ALIAS, BUCKET, SIG, bucketList, groupBy, toBucketedRow, toSums } from "./buckets.js";
+import { groupForeignKeys } from "./foreignKeys.js";
 import { loadDriver } from "./load.js";
 import type { DbAdapter, QueryResult } from "./types.js";
 
@@ -130,6 +131,25 @@ export async function connectPostgres(url: URL): Promise<DbAdapter> {
         columns: cols.map((c) => ({ name: String(c.name), type: String(c.type), nullable: Boolean(c.nullable), comment: text(c.comment) })),
         comment: text(comment),
       };
+    },
+    fromClause: from,
+    async foreignKeys(t) {
+      // pg_catalog, like primaryKey: information_schema hides constraints from SELECT-only users
+      const rows = await query(
+        `SELECT c.conname AS key, a.attname AS col, rn.nspname AS rschema, rc.relname AS rtable, ra.attname AS rcol
+           FROM pg_constraint c
+           CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(attnum, rattnum, ord)
+           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+           JOIN pg_class rc ON rc.oid = c.confrelid
+           JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+           JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = k.rattnum
+          WHERE c.contype = 'f' AND c.conrelid = to_regclass($1)
+          ORDER BY c.conname, k.ord`,
+        [name(t)],
+      );
+      return groupForeignKeys(
+        rows.map((r) => ({ key: String(r.key), column: String(r.col), schema: String(r.rschema), table: String(r.rtable), referencedColumn: String(r.rcol) })),
+      );
     },
     async runQuery(sql, maxRows) {
       // A read-only transaction (the server refuses any write), and a cursor so that only the rows
